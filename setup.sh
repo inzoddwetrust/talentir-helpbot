@@ -137,16 +137,52 @@ log "Creating virtual environment..."
 python3 -m venv "$INSTALL_PATH/venv"
 chown -R "$INSTALL_USER:$INSTALL_USER" "$INSTALL_PATH/venv"
 
-# Создание requirements-debian.txt если нужно
-log "Preparing requirements for Debian..."
+# Создание оптимизированного requirements-debian.txt
+log "Creating optimized requirements for Debian..."
 su - "$INSTALL_USER" -c "
    cd $INSTALL_PATH/bot && \
-   if [ ! -f requirements-debian.txt ]; then
-       # Создаем адаптированную версию requirements.txt для Debian
-       cp requirements.txt requirements-debian.txt
-       # Убираем macOS-специфичные пакеты если есть
-       sed -i '/^pyobjc/d' requirements-debian.txt 2>/dev/null || true
-   fi
+   cat > requirements-debian.txt << 'EOF'
+aiofiles==24.1.0
+aiogram==3.19.0
+aiohappyeyeballs==2.6.1
+aiohttp==3.11.16
+aiosignal==1.3.2
+annotated-types==0.7.0
+async-timeout==5.0.1
+attrs==25.3.0
+cachetools==5.5.2
+certifi==2025.1.31
+charset-normalizer==3.4.1
+frozenlist==1.5.0
+google-api-core==2.24.2
+google-api-python-client==2.167.0
+google-auth==2.39.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.1
+googleapis-common-protos==1.70.0
+greenlet==3.1.1
+gspread==6.2.0
+httplib2==0.22.0
+idna==3.10
+magic-filter==1.0.12
+multidict==6.4.2
+oauthlib==3.2.2
+propcache==0.3.1
+proto-plus==1.26.1
+protobuf==6.30.2
+pyasn1==0.6.1
+pyasn1-modules==0.4.2
+pyparsing==3.2.3
+python-dotenv==1.1.0
+requests==2.32.3
+requests-oauthlib==2.0.0
+rsa==4.9
+SQLAlchemy==2.0.40
+typing-extensions==4.13.1
+uritemplate==4.1.1
+urllib3==2.4.0
+yarl==1.19.0
+EOF
 "
 
 # Активация виртуального окружения и установка пакетов
