@@ -50,6 +50,7 @@ class DialogueService:
         # Will be set by external router
         self.message_router = None
         self.check_stale_task = None
+        self.check_fsm_task = None  # For FSM cleanup task
 
     def set_message_router(self, router):
         """Set message router for handling dialogue messages."""
@@ -81,10 +82,6 @@ class DialogueService:
                 return None
             logger.info(f"Config.GROUP_ID returns: {Config.get(Config.GROUP_ID)}")
 
-            if not group_id:
-                logger.error("GROUP_ID not configured")
-                return None
-
             # Create topic in operators group
             topic_name = f"Ticket #{ticket.ticketID}"
             if ticket.category:
@@ -102,7 +99,7 @@ class DialogueService:
 
             # Save all needed data BEFORE session closes
             client_telegram_id = None
-            client_display_name = None
+            client_user_obj = None  # Save object for _send_welcome_messages
 
             with get_db_session_ctx() as session:
                 # Get client user
@@ -111,9 +108,15 @@ class DialogueService:
                     logger.error(f"Client user {ticket.userID} not found")
                     return None
 
+                # LOG: Current FSM state before creating dialogue
+                current_fsm_state = client_user.get_fsm_state()
+                current_fsm_context = client_user.get_fsm_context()
+                logger.info(f"User {client_user.telegramID} FSM before dialogue creation: "
+                            f"state='{current_fsm_state}', context={current_fsm_context}")
+
                 # SAVE ALL DATA WE NEED
                 client_telegram_id = client_user.telegramID
-                client_display_name = client_user.displayName
+                client_user_obj = client_user  # For welcome messages
 
                 # Create dialogue record
                 dialogue = Dialogue(
@@ -141,8 +144,19 @@ class DialogueService:
 
                 session.add(dialogue)
 
-                # Set client FSM state
-                client_user.set_fsm_state("has_ticket", {"ticket_id": ticket.ticketID})
+                # Set client FSM state WITH FULL CONTEXT
+                fsm_context = {
+                    "dialogue_id": dialogue_id,
+                    "ticket_id": ticket.ticketID,
+                    "thread_id": thread_id,
+                    "operator_id": operator_id,
+                    "created_at": datetime.now().isoformat()
+                }
+                client_user.set_fsm_state("has_ticket", fsm_context)
+
+                # LOG: New FSM state after setting
+                logger.info(f"User {client_user.telegramID} FSM after dialogue creation: "
+                            f"state='has_ticket', context={fsm_context}")
 
                 # Update ticket dialogue reference
                 ticket.dialogueID = dialogue_id
@@ -153,7 +167,7 @@ class DialogueService:
             await self._register_dialogue_handlers(dialogue_id, client_telegram_id, group_id, thread_id)
 
             # Send welcome messages with saved data
-            await self._send_welcome_messages(dialogue_id, ticket, client_display_name)
+            await self._send_welcome_messages(dialogue_id, ticket, client_user_obj)
 
             logger.info(f"Created dialogue {dialogue_id} successfully")
             return dialogue_id
@@ -163,28 +177,27 @@ class DialogueService:
             return None
 
     async def close_dialogue(self, dialogue_id: str, closed_by: str, reason: str = None) -> bool:
-        """
-        Close an active dialogue.
-
-        Args:
-            dialogue_id: Dialogue ID
-            closed_by: Who closed the dialogue ('client', 'operator', 'system')
-            reason: Optional reason for closing
-
-        Returns:
-            bool: Success status
-        """
+        """Close an active dialogue."""
         try:
-            logger.info(f"Closing dialogue {dialogue_id}, closed by {closed_by}")
+            logger.info(f"Closing dialogue {dialogue_id}, closed_by={closed_by}, reason='{reason}'")
 
             with get_db_session_ctx() as session:
                 dialogue = session.query(Dialogue).filter_by(dialogueID=dialogue_id).first()
                 if not dialogue or dialogue.status != 'active':
-                    logger.warning(f"Dialogue {dialogue_id} not found or not active")
+                    logger.warning(
+                        f"Dialogue {dialogue_id} not found or not active (status={dialogue.status if dialogue else 'None'})")
                     return False
 
                 # Get client for FSM cleanup
                 client_user = session.query(User).filter_by(userID=dialogue.userID).first()
+                client_telegram_id = client_user.telegramID if client_user else None
+
+                # LOG: FSM state before clearing
+                if client_user:
+                    fsm_state = client_user.get_fsm_state()
+                    fsm_context = client_user.get_fsm_context()
+                    logger.info(f"User {client_user.telegramID} FSM before closing dialogue: "
+                                f"state='{fsm_state}', context={fsm_context}")
 
                 # Update dialogue
                 dialogue.status = 'closed'
@@ -192,14 +205,14 @@ class DialogueService:
                 dialogue.closedBy = closed_by
                 dialogue.closeReason = reason
 
-                # Переименовываем топик, чтобы показать что он закрыт
+                # Rename topic to show it's closed
                 if dialogue.threadID and dialogue.groupID:
                     try:
-                        # Получаем информацию о тикете для названия
+                        # Get ticket info for topic name
                         if dialogue.ticketID:
                             ticket = session.query(Ticket).filter_by(ticketID=dialogue.ticketID).first()
                             if ticket:
-                                # Формируем новое название BASED ON DIALOGUE STATE
+                                # Format new name BASED ON DIALOGUE STATE
                                 if dialogue.state == str(DialogueState.SPAM):
                                     closed_name = f"🚫 [SPAM] Ticket #{ticket.ticketID}"
                                 elif dialogue.state == str(DialogueState.RESOLVED):
@@ -207,12 +220,12 @@ class DialogueService:
                                 else:
                                     closed_name = f"🚫 [CLOSED] Ticket #{ticket.ticketID}"
 
-                                # Меняем название топика
+                                # Change topic name
                                 await self.bot.edit_forum_topic(
                                     chat_id=dialogue.groupID,
                                     message_thread_id=dialogue.threadID,
                                     name=closed_name,
-                                    icon_custom_emoji_id=None  # Убираем кастомный эмодзи если был
+                                    icon_custom_emoji_id=None  # Remove custom emoji if any
                                 )
 
                                 logger.info(f"Renamed closed topic for dialogue {dialogue_id}")
@@ -221,17 +234,20 @@ class DialogueService:
 
                 # Clear client FSM if they're in this dialogue
                 if client_user and client_user.get_fsm_state() == "has_ticket":
-                    fsm_data = client_user.get_fsm_data()
-                    # ИСПРАВЛЕНО: проверяем ticket_id, а не dialogue_id
-                    if fsm_data and fsm_data.get('ticket_id') == dialogue.ticketID:
+                    fsm_context = client_user.get_fsm_context()
+                    # Check if this is the right dialogue
+                    if fsm_context.get('dialogue_id') == dialogue_id:
+                        logger.info(f"Clearing FSM for user {client_user.telegramID}")
                         client_user.clear_fsm()
-                        logger.info(f"Cleared FSM for user {client_user.telegramID}")
+                    else:
+                        logger.warning(f"FSM dialogue_id mismatch for user {client_user.telegramID}: "
+                                       f"FSM has '{fsm_context.get('dialogue_id')}', closing '{dialogue_id}'")
 
                 # Update ticket status if exists
                 if dialogue.ticketID:
                     ticket = session.query(Ticket).filter_by(ticketID=dialogue.ticketID).first()
                     if ticket:
-                        # Определяем статус тикета по состоянию диалога
+                        # Set ticket status based on dialogue state
                         if dialogue.state == str(DialogueState.SPAM):
                             ticket.status = TicketStatus.SPAM
                             ticket.resolution = 'Marked as spam'
@@ -251,9 +267,14 @@ class DialogueService:
                 # Send closing messages
                 await self._send_closing_messages(dialogue_id, closed_by, reason)
 
-                # Unregister handlers
-                await self._unregister_dialogue_handlers(dialogue_id, client_user.telegramID,
+                # Unregister handlers AND cleanup ALL user handlers
+                await self._unregister_dialogue_handlers(dialogue_id, client_telegram_id,
                                                          dialogue.groupID, dialogue.threadID)
+
+                # CRITICAL: Cleanup ALL user handlers to prevent zombies
+                if client_telegram_id:
+                    logger.info(f"[CLOSE_DIALOGUE] Cleaning up ALL handlers for user {client_telegram_id}")
+                    await self.input_service.cleanup_user_handlers(client_telegram_id)
 
             logger.info(f"Dialogue {dialogue_id} closed successfully")
             return True
@@ -357,7 +378,7 @@ class DialogueService:
                                   ticket_id: int, operator_id: int) -> Optional[int]:
         """Create forum topic in operators group."""
         try:
-            logger.info(f"Creating topic: group_id={group_id}, name='{topic_name}'")  # ДОБАВЛЕНО
+            logger.info(f"Creating topic: group_id={group_id}, name='{topic_name}'")
 
             # All data operations inside session context
             with get_db_session_ctx() as session:
@@ -401,7 +422,7 @@ class DialogueService:
             colors = [0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F]
             icon_color = colors[operator_id % len(colors)]
 
-            logger.info(f"Actually creating topic with chat_id={group_id}")  # ДОБАВЛЕНО
+            logger.info(f"Actually creating topic with chat_id={group_id}")
 
             # Create topic
             topic: ForumTopic = await self.bot.create_forum_topic(
@@ -435,19 +456,78 @@ class DialogueService:
                                           group_id: int, thread_id: int):
         """Register message handlers for client and operator."""
         try:
-            # Handler for client messages (user in FSM state "has_ticket")
-            async def handle_client_message(message):
-                if self.message_router:
-                    await self.message_router.route_client_message(message, dialogue_id)
+            logger.info(f"Registering handlers for dialogue {dialogue_id}: "
+                        f"client={client_telegram_id}, group={group_id}, thread={thread_id}")
 
+            # CRITICAL: Clean up any existing handlers for this user BEFORE registering new ones
+            logger.info(f"[REGISTER_HANDLERS] Cleaning up old handlers for user {client_telegram_id} before registration")
+            await self.input_service.cleanup_user_handlers(client_telegram_id)
+
+            # Handler for client messages - NO CLOSURE on dialogue_id!
+            async def handle_client_message(message):
+                logger.debug(f"Client handler triggered for user {client_telegram_id}")
+
+                # ALWAYS get current dialogue_id from FSM
+                with get_db_session_ctx() as session:
+                    user = session.query(User).filter_by(telegramID=client_telegram_id).first()
+                    if not user:
+                        logger.error(f"User {client_telegram_id} not found in handler")
+                        return
+
+                    if user.get_fsm_state() != "has_ticket":
+                        logger.warning(f"User {client_telegram_id} not in has_ticket state in handler")
+                        return
+
+                    fsm_context = user.get_fsm_context()
+                    current_dialogue_id = fsm_context.get("dialogue_id")
+
+                    if not current_dialogue_id:
+                        logger.error(f"No dialogue_id in FSM for user {client_telegram_id}")
+                        return
+
+                    # CRITICAL: Check that dialogue exists and is active
+                    dialogue = session.query(Dialogue).filter_by(
+                        dialogueID=current_dialogue_id,
+                        status='active'
+                    ).first()
+
+                    if not dialogue:
+                        logger.warning(
+                            f"User {client_telegram_id} trying to send message to inactive/missing "
+                            f"dialogue {current_dialogue_id}. Clearing FSM and notifying user."
+                        )
+                        user.clear_fsm()
+                        session.commit()
+
+                        # CRITICAL: Notify user that ticket is closed
+                        await self.message_service.send_template_to_telegram_id(
+                            telegram_id=client_telegram_id,
+                            template_key='/support/ticket_closed_notification',
+                            variables={'dialogue_id': current_dialogue_id}
+                        )
+
+                        # CRITICAL: Clean up this handler since dialogue is no longer active
+                        logger.info(f"[CLIENT_HANDLER] Cleaning up handler for user {client_telegram_id} after inactive dialogue detected")
+                        await self.input_service.cleanup_user_handlers(client_telegram_id)
+                        return
+
+                    logger.debug(f"Routing to active dialogue {current_dialogue_id}")
+                    if self.message_router:
+                        await self.message_router.route_client_message(message, current_dialogue_id)
+
+            # REGISTER HANDLER FOR CLIENT
             await self.input_service.register_user_handler(
                 user_id=client_telegram_id,
                 handler=handle_client_message,
                 state="has_ticket"
             )
+            logger.info(f"Registered client handler for user {client_telegram_id} with state 'has_ticket'")
 
-            # Handler for operator messages (in thread)
+            # Handler for operator messages - closure on dialogue_id is OK here,
+            # because thread is tied to specific dialogue
             async def handle_operator_message(message):
+                logger.debug(f"Operator handler triggered in thread {thread_id}, "
+                             f"forwarding to dialogue {dialogue_id}")
                 if self.message_router:
                     await self.message_router.route_operator_message(message, dialogue_id)
 
@@ -456,21 +536,26 @@ class DialogueService:
                 thread_id=thread_id,
                 handler=handle_operator_message
             )
-
-            logger.info(f"Registered handlers for dialogue {dialogue_id}")
+            logger.info(f"Registered operator handler for thread {group_id}/{thread_id}")
 
         except Exception as e:
-            logger.error(f"Error registering handlers: {e}")
+            logger.error(f"Error registering handlers for dialogue {dialogue_id}: {e}", exc_info=True)
 
     async def _unregister_dialogue_handlers(self, dialogue_id: str, client_telegram_id: int,
                                             group_id: int, thread_id: int):
         """Unregister message handlers."""
         try:
+            logger.info(f"Unregistering handlers for dialogue {dialogue_id}: "
+                        f"client={client_telegram_id}, thread={group_id}/{thread_id}")
+
             await self.input_service.unregister_user_handler(client_telegram_id, state="has_ticket")
+            logger.info(f"Unregistered client handler for user {client_telegram_id}")
+
             await self.input_service.unregister_thread_handler(group_id, thread_id)
-            logger.info(f"Unregistered handlers for dialogue {dialogue_id}")
+            logger.info(f"Unregistered operator handler for thread {group_id}/{thread_id}")
+
         except Exception as e:
-            logger.error(f"Error unregistering handlers: {e}")
+            logger.error(f"Error unregistering handlers for dialogue {dialogue_id}: {e}", exc_info=True)
 
     async def _send_welcome_messages(self, dialogue_id: str, ticket: Ticket, client_user: User):
         """Send welcome messages to client and operator."""
@@ -556,10 +641,15 @@ class DialogueService:
             logger.error(f"Error sending closing messages: {e}")
 
     async def start_stale_check_task(self):
-        """Start background task for checking stale dialogues."""
+        """Start background tasks for checking stale dialogues and FSM."""
         if self.check_stale_task is None:
             self.check_stale_task = asyncio.create_task(self._check_stale_dialogues())
             logger.info("Started stale dialogue check task")
+
+        # Start FSM check task
+        if self.check_fsm_task is None:
+            self.check_fsm_task = asyncio.create_task(self.check_stale_fsm_states())
+            logger.info("Started stale FSM check task")
 
     async def _check_stale_dialogues(self):
         """Background task to check and close stale dialogues."""
@@ -580,6 +670,10 @@ class DialogueService:
                     for dialogue in stale_dialogues:
                         logger.info(f"Auto-closing stale dialogue {dialogue.dialogueID}")
 
+                        # Get client info for cleanup
+                        client_user = session.query(User).filter_by(userID=dialogue.userID).first()
+                        client_telegram_id = client_user.telegramID if client_user else None
+
                         # Update state to CLOSED
                         dialogue.state = str(DialogueState.CLOSED)
                         dialogue.status = 'closed'
@@ -588,7 +682,6 @@ class DialogueService:
                         dialogue.closeReason = f'auto-closed after {auto_close_hours} hours of inactivity'
 
                         # Clear client FSM
-                        client_user = session.query(User).filter_by(userID=dialogue.userID).first()
                         if client_user and client_user.get_fsm_state() == "has_ticket":
                             client_user.clear_fsm()
 
@@ -596,16 +689,79 @@ class DialogueService:
                         if dialogue.ticketID:
                             ticket = session.query(Ticket).filter_by(ticketID=dialogue.ticketID).first()
                             if ticket:
-                                ticket.status = 'closed'
+                                ticket.status = TicketStatus.CLOSED
                                 ticket.resolution = f'Auto-closed due to inactivity'
 
                         session.commit()
+
+                        # CRITICAL: Clean up handlers
+                        if client_telegram_id:
+                            logger.info(f"[STALE_CHECK] Cleaning up handlers for user {client_telegram_id} after auto-close")
+                            await self.input_service.cleanup_user_handlers(client_telegram_id)
 
                         # Send notifications
                         await self._send_timeout_notifications(dialogue.dialogueID)
 
             except Exception as e:
                 logger.error(f"Error in stale dialogue check: {e}", exc_info=True)
+
+    async def check_stale_fsm_states(self):
+        """Background task to check and clean stale FSM states."""
+        while True:
+            try:
+                await asyncio.sleep(600)  # Check every 10 minutes
+
+                with get_db_session_ctx() as session:
+                    # Find users with has_ticket FSM state
+                    users_with_fsm = session.query(User).filter(
+                        User.stateFSM.isnot(None)
+                    ).all()
+
+                    cleaned_count = 0
+                    handlers_cleaned = 0
+
+                    for user in users_with_fsm:
+                        if user.get_fsm_state() == "has_ticket":
+                            fsm_context = user.get_fsm_context()
+                            dialogue_id = fsm_context.get('dialogue_id')
+
+                            if dialogue_id:
+                                # Check if dialogue is still active
+                                dialogue = session.query(Dialogue).filter_by(
+                                    dialogueID=dialogue_id,
+                                    status='active'
+                                ).first()
+
+                                if not dialogue:
+                                    logger.info(
+                                        f"[FSM_CHECK] Cleaning stale FSM for user {user.telegramID}: "
+                                        f"dialogue {dialogue_id} is not active"
+                                    )
+                                    user.clear_fsm()
+                                    cleaned_count += 1
+
+                                    # CRITICAL: Also clean up handlers
+                                    await self.input_service.cleanup_user_handlers(user.telegramID)
+                                    handlers_cleaned += 1
+                            else:
+                                # FSM without dialogue_id is invalid
+                                logger.warning(
+                                    f"[FSM_CHECK] Cleaning invalid FSM for user {user.telegramID}: "
+                                    f"no dialogue_id in context"
+                                )
+                                user.clear_fsm()
+                                cleaned_count += 1
+
+                                # CRITICAL: Also clean up handlers
+                                await self.input_service.cleanup_user_handlers(user.telegramID)
+                                handlers_cleaned += 1
+
+                    if cleaned_count > 0:
+                        session.commit()
+                        logger.info(f"[FSM_CHECK] Cleaned {cleaned_count} stale FSM states and {handlers_cleaned} handler sets")
+
+            except Exception as e:
+                logger.error(f"Error in stale FSM check: {e}", exc_info=True)
 
     async def _send_timeout_notifications(self, dialogue_id: str):
         """Send notifications about auto-closed dialogue."""
@@ -662,6 +818,28 @@ class DialogueService:
                             logger.warning(
                                 f"Client user {dialogue.userID} not found for dialogue {dialogue.dialogueID}")
                             continue
+
+                        # Check FSM state consistency
+                        fsm_state = client_user.get_fsm_state()
+                        fsm_context = client_user.get_fsm_context()
+                        fsm_dialogue_id = fsm_context.get('dialogue_id') if fsm_context else None
+
+                        if fsm_state != "has_ticket" or fsm_dialogue_id != dialogue.dialogueID:
+                            logger.warning(
+                                f"[RESTORE] FSM inconsistency for user {client_user.telegramID}: "
+                                f"FSM state='{fsm_state}', FSM dialogue='{fsm_dialogue_id}', "
+                                f"actual dialogue='{dialogue.dialogueID}'. Fixing FSM."
+                            )
+                            # Fix FSM
+                            fsm_context = {
+                                "dialogue_id": dialogue.dialogueID,
+                                "ticket_id": dialogue.ticketID,
+                                "thread_id": dialogue.threadID,
+                                "operator_id": dialogue.operatorID,
+                                "restored_at": datetime.now().isoformat()
+                            }
+                            client_user.set_fsm_state("has_ticket", fsm_context)
+                            session.commit()
 
                         # Re-register handlers
                         await self._register_dialogue_handlers(

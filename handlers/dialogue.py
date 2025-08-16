@@ -58,13 +58,69 @@ notification_manager = TicketNotificationManager()
 async def cmd_start(message: Message, user, mainbot_user, user_type, session, message_manager: MessageManager):
     """Handle /start command with optional error payload."""
     try:
-        # Check if user already has an active ticket/dialogue
+        # Get InputService for handler cleanup
+        from core.di import get_service
+        from core.input_service import InputService
+        input_service = get_service(InputService)
+
+        # FIRST: Check FSM state for existing ticket
+        if user.get_fsm_state() == "has_ticket":
+            fsm_context = user.get_fsm_context()
+            fsm_dialogue_id = fsm_context.get('dialogue_id')
+
+            if fsm_dialogue_id:
+                # Check if dialogue from FSM exists and is active
+                existing_dialogue = session.query(Dialogue).filter_by(
+                    dialogueID=fsm_dialogue_id,
+                    status='active'
+                ).first()
+
+                if existing_dialogue:
+                    # Dialogue is active - show existing ticket
+                    logger.info(f"User {user.telegramID} already has active dialogue {fsm_dialogue_id}")
+                    await message_manager.send_template(
+                        user=user,
+                        template_key="/support/already_has_ticket",
+                        update=message,
+                        variables={"ticket_id": existing_dialogue.ticketID}
+                    )
+                    return
+                else:
+                    # Dialogue from FSM is inactive - clear FSM AND handlers
+                    logger.warning(
+                        f"User {user.telegramID} has stale FSM state for dialogue {fsm_dialogue_id}, clearing")
+                    user.clear_fsm()
+                    session.commit()
+
+                    # CRITICAL: Clean up any zombie handlers
+                    if input_service:
+                        logger.info(f"[CMD_START] Cleaning up stale handlers for user {user.telegramID}")
+                        await input_service.cleanup_user_handlers(user.telegramID)
+
+                    # Continue with new ticket creation
+
+        # Additional check for active dialogues in DB (in case FSM is out of sync)
         active_dialogue = session.query(Dialogue).filter_by(
             userID=user.userID,
             status='active'
         ).first()
 
         if active_dialogue:
+            # Sync FSM if needed
+            if user.get_fsm_state() != "has_ticket":
+                logger.warning(
+                    f"User {user.telegramID} has active dialogue {active_dialogue.dialogueID} but no FSM state, syncing")
+                fsm_context = {
+                    "dialogue_id": active_dialogue.dialogueID,
+                    "ticket_id": active_dialogue.ticketID,
+                    "thread_id": active_dialogue.threadID,
+                    "operator_id": active_dialogue.operatorID,
+                    "created_at": active_dialogue.createdAt.isoformat() if active_dialogue.createdAt else None
+                }
+                user.set_fsm_state("has_ticket", fsm_context)
+                session.commit()
+                # Note: NOT cleaning handlers here because dialogue is active!
+
             await message_manager.send_template(
                 user=user,
                 template_key="/support/already_has_ticket",
@@ -73,7 +129,7 @@ async def cmd_start(message: Message, user, mainbot_user, user_type, session, me
             )
             return
 
-        # Check for open tickets - ПРАВИЛЬНЫЙ СИНТАКСИС
+        # Check for open tickets
         open_ticket = session.query(Ticket).filter(
             Ticket.userID == user.userID,
             Ticket.status.in_([TicketStatus.OPEN, TicketStatus.IN_PROGRESS])
@@ -87,6 +143,12 @@ async def cmd_start(message: Message, user, mainbot_user, user_type, session, me
                 variables={"ticket_id": open_ticket.ticketID}
             )
             return
+
+        # CRITICAL: Clean up any potential zombie handlers before creating new ticket
+        if input_service:
+            logger.info(
+                f"[CMD_START] Preventive cleanup of handlers for user {user.telegramID} before creating new ticket")
+            await input_service.cleanup_user_handlers(user.telegramID)
 
         # Parse payload if exists
         error_code = None
@@ -240,7 +302,7 @@ async def handle_take_ticket(callback: CallbackQuery, user, user_type, mainbot_u
 
         # Update ticket status
         ticket.status = TicketStatus.IN_PROGRESS
-        ticket.assignedOperatorID = operator.operatorID  # ИСПРАВЛЕНО!
+        ticket.assignedOperatorID = operator.operatorID
         ticket.assignedAt = datetime.utcnow()
 
         # Update operator's current tickets count
@@ -256,7 +318,7 @@ async def handle_take_ticket(callback: CallbackQuery, user, user_type, mainbot_u
         # Create dialogue
         dialogue_id = await dialogue_service.create_support_dialogue(
             ticket=ticket,
-            operator_id=operator.operatorID,  # ИСПРАВЛЕНО!
+            operator_id=operator.operatorID,
             context={
                 'operator_id': operator_id,
                 'operator_name': operator.displayName or user.displayName,

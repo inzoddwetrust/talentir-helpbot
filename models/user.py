@@ -43,12 +43,6 @@ class User(Base):
     # For operators/admins
     isOnline = Column(Boolean, default=False)
 
-    # УДАЛИЛИ ОПЕРАТОРСКИЕ ПОЛЯ:
-    # maxConcurrentTickets
-    # currentTicketsCount
-    # totalTicketsResolved
-    # avgResolutionTime
-
     # JSON fields for flexibility
     notes = Column(Text, nullable=True)
     settings = Column(Text, nullable=True)  # JSON with user preferences
@@ -72,21 +66,6 @@ class User(Base):
         """Check if user is staff member"""
         return self.user_type in [UserType.OPERATOR, UserType.ADMIN]
 
-    def get_settings(self):
-        """Get user settings as dict"""
-        if not self.settings:
-            return {}
-        try:
-            return json.loads(self.settings)
-        except json.JSONDecodeError:
-            return {}
-
-    def update_settings(self, key: str, value: any):
-        """Update specific setting"""
-        settings = self.get_settings()
-        settings[key] = value
-        self.settings = json.dumps(settings)
-
     def get_permissions(self):
         """Get staff permissions as dict"""
         if not self.permissions or not self.isStaff:
@@ -96,14 +75,7 @@ class User(Base):
         except json.JSONDecodeError:
             return {}
 
-    def has_permission(self, permission: str):
-        """Check if staff member has specific permission"""
-        if self.user_type == UserType.ADMIN:
-            return True  # Admins have all permissions
-        permissions = self.get_permissions()
-        return permissions.get(permission, False)
-
-    # FSM methods from original
+    # FSM methods
     def get_fsm_state(self):
         """Gets current FSM state."""
         if not self.stateFSM:
@@ -114,22 +86,36 @@ class User(Base):
         except json.JSONDecodeError:
             return None
 
-    def set_fsm_state(self, state, data=None):
-        """Sets FSM state and optional data."""
-        fsm_data = {"state": state}
-        if data is not None:
-            fsm_data["data"] = data
+    def set_fsm_state(self, state, context=None):
+        """
+        Sets FSM state with optional context.
+
+        Args:
+            state: State name
+            context: Optional context dict for this state
+        """
+        fsm_data = {
+            "state": state,
+            "context": context or {}
+        }
         self.stateFSM = json.dumps(fsm_data)
 
-    def get_fsm_data(self):
-        """Gets FSM data dictionary."""
+    def get_fsm_context(self):
+        """Gets FSM context dictionary."""
         if not self.stateFSM:
             return {}
         try:
             fsm_data = json.loads(self.stateFSM)
-            return fsm_data.get("data", {})
+            return fsm_data.get("context", {})
         except json.JSONDecodeError:
             return {}
+
+    def get_fsm_data(self):
+        """
+        Legacy method for backward compatibility.
+        Returns FSM context.
+        """
+        return self.get_fsm_context()
 
     def clear_fsm(self):
         """Clears FSM state."""

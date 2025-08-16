@@ -421,6 +421,258 @@ async def handle_list_operators(message: Message, user, user_type, mainbot_user,
         )
 
 
+@admin_router.message(F.text == '&handlers')
+@with_user(staff_only=True)
+async def handle_show_handlers(message: Message, user, user_type, mainbot_user, session,
+                               message_manager: MessageManager):
+    """Show handler statistics and debug info."""
+    try:
+        from core.di import get_service
+        from core.input_service import InputService
+
+        input_service = get_service(InputService)
+        if not input_service:
+            await message_manager.send_template(
+                user=user,
+                template_key="/admin/error",
+                update=message,
+                variables={
+                    "session": session,
+                    "error": "InputService not available",
+                    "command": "handlers"
+                }
+            )
+            return
+
+        # Get overall statistics
+        stats = input_service.get_all_handlers_stats()
+
+        # Build message
+        message_text = "📊 <b>Handler Statistics</b>\n\n"
+        message_text += f"Router handlers: {stats['total_in_router']}\n"
+        message_text += f"Tracked handlers: {stats['total_in_dict']}\n"
+        message_text += f"User handlers: {stats['user_handlers']}\n"
+        message_text += f"Thread handlers: {stats['thread_handlers']}\n"
+
+        # Potential zombies
+        if stats['potential_zombies'] > 0:
+            message_text += f"\n⚠️ <b>Potential zombies: {stats['potential_zombies']}</b>\n"
+
+        # Users with handlers
+        if stats['users_with_handlers']:
+            message_text += "\n👥 <b>Users with handlers:</b>\n"
+            for user_id, count in stats['users_with_handlers'].items():
+                # Get user info
+                handler_user = session.query(User).filter_by(telegramID=int(user_id)).first()
+                user_name = handler_user.displayName if handler_user else f"Unknown ({user_id})"
+
+                # Check if user has active dialogue
+                active_dialogue = session.query(Dialogue).filter_by(
+                    userID=handler_user.userID if handler_user else None,
+                    status='active'
+                ).first() if handler_user else None
+
+                status = "✅ Active" if active_dialogue else "⚠️ No active dialogue"
+
+                message_text += f"  • {user_name}: {count} handler(s) - {status}\n"
+
+                # If no active dialogue but has handlers - these are zombies!
+                if not active_dialogue and count > 0:
+                    message_text += f"    <i>→ Zombie handlers detected!</i>\n"
+
+        # Send message
+        await message.answer(message_text, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error in show_handlers command: {e}", exc_info=True)
+        await message_manager.send_template(
+            user=user,
+            template_key="/admin/error",
+            update=message,
+            variables={
+                "session": session,
+                "error": str(e),
+                "command": "handlers"
+            }
+        )
+
+
+@admin_router.message(F.text.startswith('&handlers_'))
+@with_user(staff_only=True)
+async def handle_user_handlers(message: Message, user, user_type, mainbot_user, session,
+                               message_manager: MessageManager):
+    """Show handlers for specific user. Format: &handlers_12345"""
+    try:
+        match = re.match(r'^&handlers_(\d+)$', message.text)
+        if not match:
+            await message.answer("Invalid format. Use: &handlers_12345")
+            return
+
+        target_telegram_id = int(match.group(1))
+
+        from core.di import get_service
+        from core.input_service import InputService
+
+        input_service = get_service(InputService)
+        if not input_service:
+            await message_manager.send_template(
+                user=user,
+                template_key="/admin/error",
+                update=message,
+                variables={
+                    "session": session,
+                    "error": "InputService not available",
+                    "command": "handlers"
+                }
+            )
+            return
+
+        # Get user handlers
+        user_handlers = input_service.get_user_handlers(target_telegram_id)
+
+        # Get user info
+        target_user = session.query(User).filter_by(telegramID=target_telegram_id).first()
+
+        # Build message
+        message_text = f"🔍 <b>Handlers for user {target_telegram_id}</b>\n"
+        if target_user:
+            message_text += f"Name: {target_user.displayName}\n"
+            message_text += f"FSM State: {target_user.get_fsm_state() or 'None'}\n"
+
+            # Check FSM context
+            fsm_context = target_user.get_fsm_context()
+            if fsm_context and 'dialogue_id' in fsm_context:
+                message_text += f"FSM Dialogue: {fsm_context['dialogue_id']}\n"
+        else:
+            message_text += "User not found in DB\n"
+
+        message_text += f"\n<b>Handlers ({len(user_handlers)}):</b>\n"
+
+        if user_handlers:
+            for handler in user_handlers:
+                message_text += f"\n• Handler ID: {handler['handler_id']}\n"
+                message_text += f"  State: {handler['state'] or 'any'}\n"
+                message_text += f"  Unique ID: {handler['unique_id']}\n"
+                message_text += f"  Registered at: {handler['registered_at']}\n"
+                message_text += f"  In Router: {'✅' if handler['has_router_object'] else '❌'}\n"
+        else:
+            message_text += "No handlers found\n"
+
+        # Check for active dialogue
+        if target_user:
+            active_dialogue = session.query(Dialogue).filter_by(
+                userID=target_user.userID,
+                status='active'
+            ).first()
+
+            if active_dialogue:
+                message_text += f"\n✅ <b>Active dialogue:</b> {active_dialogue.dialogueID}\n"
+            else:
+                message_text += "\n⚠️ <b>No active dialogue</b>\n"
+                if user_handlers:
+                    message_text += "→ These are zombie handlers!\n"
+
+        await message.answer(message_text, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error in user_handlers command: {e}", exc_info=True)
+        await message_manager.send_template(
+            user=user,
+            template_key="/admin/error",
+            update=message,
+            variables={
+                "session": session,
+                "error": str(e),
+                "command": "user_handlers"
+            }
+        )
+
+
+@admin_router.message(F.text == '&cleanup_zombies')
+@with_user(staff_only=True)
+async def handle_cleanup_zombies(message: Message, user, user_type, mainbot_user, session,
+                                 message_manager: MessageManager):
+    """Clean up all zombie handlers (handlers without active dialogues)."""
+    try:
+        from core.di import get_service
+        from core.input_service import InputService
+
+        input_service = get_service(InputService)
+        if not input_service:
+            await message_manager.send_template(
+                user=user,
+                template_key="/admin/error",
+                update=message,
+                variables={
+                    "session": session,
+                    "error": "InputService not available",
+                    "command": "cleanup_zombies"
+                }
+            )
+            return
+
+        # Get all handlers stats
+        stats = input_service.get_all_handlers_stats()
+
+        cleaned_count = 0
+        zombie_users = []
+
+        # Check each user with handlers
+        for user_id_str, handler_count in stats['users_with_handlers'].items():
+            user_telegram_id = int(user_id_str)
+
+            # Check if user has active dialogue
+            handler_user = session.query(User).filter_by(telegramID=user_telegram_id).first()
+            if handler_user:
+                active_dialogue = session.query(Dialogue).filter_by(
+                    userID=handler_user.userID,
+                    status='active'
+                ).first()
+
+                if not active_dialogue:
+                    # No active dialogue - these are zombies!
+                    logger.info(
+                        f"[CLEANUP_ZOMBIES] Cleaning {handler_count} zombie handlers for user {user_telegram_id}")
+                    await input_service.cleanup_user_handlers(user_telegram_id)
+                    cleaned_count += handler_count
+                    zombie_users.append(user_telegram_id)
+
+        # Build response
+        message_text = "🧹 <b>Zombie Cleanup Complete</b>\n\n"
+        message_text += f"Cleaned handlers: {cleaned_count}\n"
+        message_text += f"Affected users: {len(zombie_users)}\n"
+
+        if zombie_users:
+            message_text += "\n<b>Cleaned users:</b>\n"
+            for telegram_id in zombie_users[:10]:  # Show max 10 users
+                message_text += f"  • {telegram_id}\n"
+            if len(zombie_users) > 10:
+                message_text += f"  ... and {len(zombie_users) - 10} more\n"
+
+        # Get new stats
+        new_stats = input_service.get_all_handlers_stats()
+        message_text += f"\n<b>After cleanup:</b>\n"
+        message_text += f"Router handlers: {new_stats['total_in_router']}\n"
+        message_text += f"Tracked handlers: {new_stats['total_in_dict']}\n"
+
+        await message.answer(message_text, parse_mode="HTML")
+
+        logger.info(f"Admin {message.from_user.id} cleaned {cleaned_count} zombie handlers")
+
+    except Exception as e:
+        logger.error(f"Error in cleanup_zombies command: {e}", exc_info=True)
+        await message_manager.send_template(
+            user=user,
+            template_key="/admin/error",
+            update=message,
+            variables={
+                "session": session,
+                "error": str(e),
+                "command": "cleanup_zombies"
+            }
+        )
+
+
 # === Statistics Commands ===
 
 @admin_router.message(F.text == '&stats')

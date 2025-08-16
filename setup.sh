@@ -1,8 +1,28 @@
 #!/bin/bash
 
-INSTALL_PATH="/opt/helpbot"
-SERVICE_NAME="helpbot"
-GITHUB_REPO="git@github.com:inzoddwetrust/helpbot.git"
+# Автоматическое определение проекта из имени файла
+SCRIPT_NAME=$(basename "$0")
+if [[ "$SCRIPT_NAME" =~ setup-(.+)\.sh$ ]]; then
+    PROJECT_NAME="${BASH_REMATCH[1]}"
+else
+    echo "ERROR: Script must be named like 'setup-PROJECT-NAME.sh'"
+    echo "Example: setup-talentir-helpbot.sh, setup-jetup-helpbot.sh"
+    exit 1
+fi
+
+# Настройки на основе имени проекта
+INSTALL_PATH="/opt/${PROJECT_NAME}"
+SERVICE_NAME="${PROJECT_NAME}"
+GITHUB_REPO="git@github.com:inzoddwetrust/${PROJECT_NAME}.git"
+
+echo "=========================================="
+echo "🚀 Installing ${PROJECT_NAME}"
+echo "=========================================="
+echo "• Project: ${PROJECT_NAME}"
+echo "• Repository: ${GITHUB_REPO}"
+echo "• Install path: ${INSTALL_PATH}"
+echo "• Service name: ${SERVICE_NAME}"
+echo ""
 
 # Функция логирования
 log() {
@@ -23,12 +43,12 @@ if [ "$EUID" -ne 0 ]; then
    exit 1
 fi
 
-# Прекращаем выполнение скрипта при любой ошибке
 set -e
 
-# Проверка и установка необходимых утилит
+# Проверка и установка SSH
 command -v ssh >/dev/null 2>&1 || {
-   log "SSH is required but not installed. Installing..."
+   log "Installing SSH client..."
+   apt-get update
    apt-get install -y openssh-client
 }
 
@@ -40,7 +60,7 @@ apt-get upgrade -y
 log "Installing sudo..."
 apt-get install -y sudo
 
-# Установка системных зависимостей
+# Установка зависимостей
 log "Installing system dependencies..."
 apt-get install -y \
    build-essential \
@@ -70,25 +90,89 @@ apt-get install -y \
    libjpeg-dev \
    libgif-dev
 
-# Проверка наличия SSH ключа
-if [ ! -f ~/.ssh/id_ed25519 ]; then
-   log "SSH key not found. Generating..."
-   ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+# SSH ключи для конкретного проекта
+log "Setting up SSH key for ${PROJECT_NAME}..."
 
-   echo "Please add this public key to your GitHub repository deploy keys:"
-   echo "------------------------"
-   cat ~/.ssh/id_ed25519.pub
-   echo "------------------------"
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
 
-   echo "After adding the key to GitHub, press Enter to continue..."
-   read -r
+# Уникальный ключ для этого проекта и установки
+UNIQUE_ID="${PROJECT_NAME}_$(date +%Y%m%d_%H%M%S)_$(head /dev/urandom | tr -dc a-z0-9 | head -c 6)"
+SSH_KEY="$HOME/.ssh/id_ed25519_${UNIQUE_ID}"
+SSH_CONFIG="$HOME/.ssh/config"
+SSH_HOST_ALIAS="github.com-${UNIQUE_ID}"
+
+log "Creating unique SSH key: ${UNIQUE_ID}"
+
+# Генерируем уникальный ключ
+ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -C "${PROJECT_NAME}-deploy-${UNIQUE_ID}"
+chmod 600 "$SSH_KEY"
+chmod 644 "$SSH_KEY.pub"
+
+# Добавляем GitHub в known_hosts
+if ! grep -q "github.com" ~/.ssh/known_hosts 2>/dev/null; then
+    log "Adding GitHub to known hosts..."
+    ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
 fi
 
-# Проверка подключения к GitHub
-if ! ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
-   log "Error: Cannot authenticate with GitHub"
-   log "Please ensure the SSH key is added to GitHub deploy keys"
-   exit 1
+# SSH config
+cat >> "$SSH_CONFIG" << EOF
+
+# ${PROJECT_NAME} installation ${UNIQUE_ID} - $(date)
+Host ${SSH_HOST_ALIAS}
+    HostName github.com
+    User git
+    IdentityFile $SSH_KEY
+    IdentitiesOnly yes
+EOF
+
+chmod 600 "$SSH_CONFIG"
+
+# URL с уникальным хостом
+REPO_URL="git@${SSH_HOST_ALIAS}:inzoddwetrust/${PROJECT_NAME}.git"
+
+echo ""
+echo "=========================================="
+echo "SSH KEY FOR ${PROJECT_NAME}"
+echo "=========================================="
+echo ""
+echo "Generated unique key for: ${PROJECT_NAME}"
+echo "Key ID: ${UNIQUE_ID}"
+echo ""
+echo "Add this key to GitHub repository:"
+echo ""
+echo "1. Copy this public key:"
+echo "----------------------------------------"
+cat "$SSH_KEY.pub"
+echo "----------------------------------------"
+echo ""
+echo "2. Go to: https://github.com/inzoddwetrust/${PROJECT_NAME}/settings/keys"
+echo "3. Click 'Add deploy key'"
+echo "4. Title: '${PROJECT_NAME} Server - ${UNIQUE_ID}'"
+echo "5. Paste the key above"
+echo "6. Leave 'Allow write access' UNCHECKED"
+echo "7. Click 'Add key'"
+echo ""
+echo "IMPORTANT: Add to ${PROJECT_NAME} repository, not any other!"
+echo ""
+echo "Press Enter after adding the key..."
+read -r
+
+# Проверка доступа к конкретному репозиторию
+log "Verifying access to ${PROJECT_NAME} repository..."
+sleep 2
+
+if timeout 15 git ls-remote "$REPO_URL" HEAD >/dev/null 2>&1; then
+    log "SUCCESS: ${PROJECT_NAME} repository access confirmed!"
+else
+    echo ""
+    echo "❌ ERROR: Cannot access ${PROJECT_NAME} repository"
+    echo ""
+    echo "Make sure you added the key to the correct repository:"
+    echo "https://github.com/inzoddwetrust/${PROJECT_NAME}/settings/keys"
+    echo ""
+    echo "Test manually: git ls-remote $REPO_URL HEAD"
+    exit 1
 fi
 
 # Определение пользователя
@@ -98,25 +182,24 @@ else
    INSTALL_USER="$USER"
 fi
 
-# Проверка существующей установки
+# Управление существующей установкой
 if [ -d "$INSTALL_PATH" ]; then
-   log "Found existing installation at $INSTALL_PATH"
+   log "Found existing ${PROJECT_NAME} installation"
 
    if systemctl list-unit-files | grep -q "$SERVICE_NAME"; then
        log "Stopping existing service..."
-       systemctl stop "$SERVICE_NAME"
-       systemctl disable "$SERVICE_NAME"
+       systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+       systemctl disable "$SERVICE_NAME" 2>/dev/null || true
    fi
 
    if [ -d "$INSTALL_PATH/bot" ]; then
-       log "Creating backup of existing bot..."
+       log "Creating backup..."
        backup_dir="$INSTALL_PATH/backup_$(date +'%Y%m%d_%H%M%S')"
        mv "$INSTALL_PATH/bot" "$backup_dir"
-       log "Backup created at $backup_dir"
+       log "Backup: $backup_dir"
    fi
 
    if [ -d "$INSTALL_PATH/venv" ]; then
-       log "Removing existing virtual environment..."
        rm -rf "$INSTALL_PATH/venv"
    fi
 else
@@ -125,20 +208,23 @@ fi
 
 chown "$INSTALL_USER:$INSTALL_USER" "$INSTALL_PATH"
 
-# Клонирование репозитория
-log "Cloning repository..."
-su - "$INSTALL_USER" -c "git clone $GITHUB_REPO $INSTALL_PATH/bot" || {
-   log "Failed to clone repository"
+# Клонирование
+log "Cloning ${PROJECT_NAME} repository..."
+su - "$INSTALL_USER" -c "git clone $REPO_URL $INSTALL_PATH/bot" || {
+   log "Failed to clone ${PROJECT_NAME} repository"
+   log "Verify the SSH key was added to: https://github.com/inzoddwetrust/${PROJECT_NAME}/settings/keys"
    exit 1
 }
 
-# Создание виртуального окружения
-log "Creating virtual environment..."
+log "${PROJECT_NAME} repository cloned successfully"
+
+# Python окружение
+log "Creating Python virtual environment..."
 python3 -m venv "$INSTALL_PATH/venv"
 chown -R "$INSTALL_USER:$INSTALL_USER" "$INSTALL_PATH/venv"
 
-# Создание оптимизированного requirements-debian.txt
-log "Creating optimized requirements for Debian..."
+# Requirements оптимизированные
+log "Creating optimized requirements..."
 su - "$INSTALL_USER" -c "
    cd $INSTALL_PATH/bot && \
    cat > requirements-debian.txt << 'EOF'
@@ -185,7 +271,7 @@ yarl==1.19.0
 EOF
 "
 
-# Активация виртуального окружения и установка пакетов
+# Установка пакетов
 log "Installing Python dependencies..."
 su - "$INSTALL_USER" -c "
    source $INSTALL_PATH/venv/bin/activate && \
@@ -194,14 +280,14 @@ su - "$INSTALL_USER" -c "
    pip install -r requirements-debian.txt
 "
 
-# Создание конфигурационных файлов и директорий
-log "Creating configuration files and directories..."
+# Директории
+log "Creating directories..."
 su - "$INSTALL_USER" -c "
    cd $INSTALL_PATH/bot && \
    mkdir -p temp logs creds
 "
 
-# Создание .env если не существует
+# .env шаблон
 if [ ! -f "$INSTALL_PATH/bot/.env" ]; then
    log "Creating .env template..."
    su - "$INSTALL_USER" -c "
@@ -225,11 +311,11 @@ EOF
    "
 fi
 
-# Создание systemd сервиса
+# Systemd сервис
 log "Creating systemd service..."
 tee /etc/systemd/system/"$SERVICE_NAME".service << EOF
 [Unit]
-Description=HelpBot Support System
+Description=${PROJECT_NAME} Support System
 After=network.target
 
 [Service]
@@ -247,12 +333,9 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-# Перезагрузка systemd
-log "Reloading systemd..."
 systemctl daemon-reload
 
-# Создание логrotate конфигурации
-log "Setting up log rotation..."
+# Logrotate
 tee /etc/logrotate.d/"$SERVICE_NAME" << EOF
 $INSTALL_PATH/bot/logs/*.log {
     daily
@@ -268,12 +351,20 @@ $INSTALL_PATH/bot/logs/*.log {
 }
 EOF
 
-log "Setup complete! Please:"
-log "1. Edit .env file in $INSTALL_PATH/bot/ with your actual credentials"
-log "2. Place helpbot_key.json in $INSTALL_PATH/bot/creds/"
-log "3. Update MAINBOT_DATABASE_URL in .env to point to correct mainbot database"
-log "4. Run these commands when configuration is ready:"
-log "   sudo systemctl enable $SERVICE_NAME"
-log "   sudo systemctl start $SERVICE_NAME"
-log "5. Check status with: sudo systemctl status $SERVICE_NAME"
-log "6. View logs with: sudo journalctl -u $SERVICE_NAME -f"
+echo ""
+echo "=========================================="
+echo "✅ ${PROJECT_NAME} INSTALLATION COMPLETE!"
+echo "=========================================="
+echo ""
+echo "Project: ${PROJECT_NAME}"
+echo "SSH Key: ${UNIQUE_ID}"
+echo "Path: ${INSTALL_PATH}"
+echo "Service: ${SERVICE_NAME}"
+echo ""
+echo "Next steps:"
+echo "1. Edit: nano $INSTALL_PATH/bot/.env"
+echo "2. Add Google creds to: $INSTALL_PATH/bot/creds/"
+echo "3. Start: sudo systemctl enable $SERVICE_NAME && sudo systemctl start $SERVICE_NAME"
+echo "4. Monitor: sudo journalctl -u $SERVICE_NAME -f"
+echo ""
+echo "🎉 ${PROJECT_NAME} ready to configure!"
