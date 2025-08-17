@@ -116,6 +116,7 @@ class DialogueService:
 
                 # SAVE ALL DATA WE NEED
                 client_telegram_id = client_user.telegramID
+                client_display_name = client_user.displayName
                 client_user_obj = client_user  # For welcome messages
 
                 # Create dialogue record
@@ -167,7 +168,7 @@ class DialogueService:
             await self._register_dialogue_handlers(dialogue_id, client_telegram_id, group_id, thread_id)
 
             # Send welcome messages with saved data
-            await self._send_welcome_messages(dialogue_id, ticket, client_user_obj)
+            await self._send_welcome_messages(dialogue_id, ticket, client_telegram_id, client_display_name)
 
             logger.info(f"Created dialogue {dialogue_id} successfully")
             return dialogue_id
@@ -557,7 +558,8 @@ class DialogueService:
         except Exception as e:
             logger.error(f"Error unregistering handlers for dialogue {dialogue_id}: {e}", exc_info=True)
 
-    async def _send_welcome_messages(self, dialogue_id: str, ticket: Ticket, client_user: User):
+    async def _send_welcome_messages(self, dialogue_id: str, ticket: Ticket,
+                                     client_telegram_id: int, client_display_name: str):
         """Send welcome messages to client and operator."""
         try:
             dialogue_info = await self.get_dialogue_info(dialogue_id)
@@ -584,15 +586,17 @@ class DialogueService:
             user_info = None
             if ticket.mainbot_user_id:
                 from services.mainbot_service import MainbotService
-                user_info = await MainbotService.get_user_summary(client_user.telegramID)
+                # ИСПОЛЬЗУЕМ ПЕРЕДАННЫЙ ПАРАМЕТР, А НЕ client_user!
+                user_info = await MainbotService.get_user_summary(client_telegram_id)
 
             await self.message_service.send_template_to_endpoint(
                 endpoint=operator_endpoint,
                 template_key='/support/operator_ticket_info',
                 variables={
                     'ticket_id': ticket.ticketID,
-                    'client_name': client_user.displayName,
-                    'client_telegram_id': client_user.telegramID,
+                    # ИСПОЛЬЗУЕМ ПЕРЕДАННЫЕ ПАРАМЕТРЫ, А НЕ client_user!
+                    'client_name': client_display_name,
+                    'client_telegram_id': client_telegram_id,
                     'category': ticket.category or 'general',
                     'subject': ticket.subject or 'No subject',
                     'description': ticket.description or 'No description',

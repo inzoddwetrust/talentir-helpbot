@@ -95,6 +95,14 @@ class InputService:
             await self.unregister_user_handler(user_id, state)
 
         def user_filter(message: Message) -> bool:
+
+            if message.from_user and message.from_user.is_bot:
+                logger.debug(
+                    f"[USER_FILTER] Filter for {handler_id}: "
+                    f"Ignoring bot message from {message.from_user.id}"
+                )
+                return False
+
             # Check if message is from the right user
             if not message.from_user or message.from_user.id != user_id:
                 logger.debug(
@@ -232,6 +240,14 @@ class InputService:
             await self.unregister_thread_handler(group_id, thread_id)
 
         def thread_filter(message: Message) -> bool:
+            # Ignore bot's own messages
+            if message.from_user and message.from_user.is_bot:
+                logger.debug(
+                    f"[THREAD_FILTER] Filter for {handler_id}: "
+                    f"Ignoring bot message from {message.from_user.id}"
+                )
+                return False
+
             # Check if message is in the right group
             if message.chat.id != group_id:
                 logger.debug(
