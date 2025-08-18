@@ -16,6 +16,7 @@ from core.templates import MessageTemplates
 from core.message_manager import MessageManager
 from core.user_decorator import with_user
 from config import Config
+from models.dialogue import Dialogue
 from models.user import User, UserType
 from models.operator import Operator
 from models.ticket import Ticket, TicketStatus
