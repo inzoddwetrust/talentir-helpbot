@@ -12,9 +12,7 @@ from core.db import get_db_session_ctx
 from services.dialogue_states import DialogueState
 from services.operator_commands import get_command_config, get_all_commands
 from services.mainbot_service import MainbotService
-from models.dialogue import Dialogue
 from models.ticket import Ticket, TicketStatus
-from models.user import User
 
 logger = logging.getLogger(__name__)
 

@@ -5,18 +5,22 @@ Simplified version - only routing, no business logic.
 import logging
 from datetime import datetime
 from typing import Dict, Any, Optional
+import json
 
 from aiogram.types import Message
 from aiogram.exceptions import TelegramAPIError
 
-from core.message_service import MessageService, DialogueEndpoint
 from services.command_processor import CommandProcessor
+from services.ai_middleware import AIMiddleware
+from core.message_service import MessageService, DialogueEndpoint
 from core.db import get_db_session_ctx
 from core.di import get_service
 from core.input_service import InputService
 from models.dialogue import Dialogue
 from models.ticket import Ticket
 from models.user import User
+from models.operator import Operator
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +46,53 @@ class DialogueRouter:
         self.message_service = message_service
         self.dialogue_service = None  # Will be set externally
         self.command_processor = None  # Will be created after dialogue_service is set
+        self.ai_middleware = AIMiddleware()
 
     def set_dialogue_service(self, dialogue_service):
         """Set dialogue service reference and create command processor."""
         self.dialogue_service = dialogue_service
         # Now we can create command processor with dialogue_service
         self.command_processor = CommandProcessor(dialogue_service, self.message_service)
+
+    async def _get_user_languages(self, client_telegram_id: int, operator_telegram_id: int) -> tuple[str, str]:
+        """
+        Get languages for client and operator.
+
+        Args:
+            client_telegram_id: Client's Telegram ID
+            operator_telegram_id: Operator's Telegram ID
+
+        Returns:
+            Tuple of (client_lang, operator_lang)
+        """
+        with get_db_session_ctx() as session:
+            # Get client language
+            client_user = session.query(User).filter_by(telegramID=client_telegram_id).first()
+            client_lang = client_user.lang if client_user and client_user.lang else 'en'
+
+            # Get operator language - first try from operators table
+            operator = session.query(Operator).filter_by(telegramID=operator_telegram_id).first()
+
+            if operator and operator.languages:
+                try:
+                    # languages stored as JSON array, take first
+                    languages = json.loads(operator.languages)
+                    operator_lang = languages[0] if languages else 'en'
+                except (json.JSONDecodeError, IndexError):
+                    operator_lang = 'en'
+            else:
+                # Fallback to user table
+                operator_user = session.query(User).filter_by(telegramID=operator_telegram_id).first()
+                operator_lang = operator_user.lang if operator_user and operator_user.lang else 'en'
+
+                # Fix: save language to operator record for future
+                if operator and operator_user and operator_user.lang:
+                    operator.languages = json.dumps([operator_user.lang])
+                    session.commit()
+                    logger.info(f"Fixed missing language for operator {operator_telegram_id}: {operator_user.lang}")
+
+            logger.debug(f"Languages resolved - client: {client_lang}, operator: {operator_lang}")
+            return client_lang, operator_lang
 
     async def route_client_message(self, message: Message, dialogue_id: str) -> bool:
         """
@@ -130,6 +175,32 @@ class DialogueRouter:
             # Update dialogue activity
             await self._update_dialogue_activity(dialogue_id)
 
+            # NEW: Get languages and translate if needed
+            translation_result = {'display': message.text}  # Default - no translation
+
+            if message.text:  # Only translate text messages
+                dialogue_info = await self.dialogue_service.get_dialogue_info(dialogue_id)
+                logger.info(f"DEBUG dialogue_info: {dialogue_info}")
+                if dialogue_info and dialogue_info.get('operator_telegram_id'):
+                    operator_telegram_id = dialogue_info['operator_telegram_id']
+
+                    # Get languages
+                    client_lang, operator_lang = await self._get_user_languages(
+                        message.from_user.id,
+                        operator_telegram_id
+                    )
+
+                    # Process message with translation
+                    translation_result = await self.ai_middleware.process_dialogue_message(
+                        text=message.text,
+                        source_lang=client_lang,
+                        target_lang=operator_lang,
+                        direction='client_to_operator',
+                        dialogue_id=dialogue_id
+                    )
+                else:
+                    logger.warning(f"No operator info for dialogue {dialogue_id}, skipping translation")
+
             # Route to operator thread using saved data
             operator_endpoint = DialogueEndpoint('group', dialogue_group_id, dialogue_thread_id)
 
@@ -140,21 +211,39 @@ class DialogueRouter:
 
             # Try to send message
             result = None
+            template_key = None  # Initialize for potential reuse
+            variables = None  # Initialize for potential reuse
 
             if message.text:
                 # Send text with template
                 logger.debug(f"[ROUTE_CLIENT] Sending text message via template")
-                result = await self.message_service.send_template_to_endpoint(
-                    endpoint=operator_endpoint,
-                    template_key='/support/operator_client_message',
-                    variables={
+
+                # Choose template based on translation result
+                if translation_result.get('display') == 'both':
+                    # Use translated template - operator sees both
+                    template_key = '/support/translated_client_message'
+                    variables = {
+                        'client_name': 'Client',
+                        'original': translation_result['original'],
+                        'translated': translation_result['translated'],
+                        'dialogue_id': dialogue_id
+                    }
+                else:
+                    # Use regular template - no translation needed
+                    template_key = '/support/operator_client_message'
+                    variables = {
                         'client_name': 'Client',
                         'message': message.text,
                         'dialogue_id': dialogue_id
                     }
+
+                result = await self.message_service.send_template_to_endpoint(
+                    endpoint=operator_endpoint,
+                    template_key=template_key,
+                    variables=variables
                 )
             else:
-                # Forward media directly
+                # Forward media directly (no translation for media)
                 logger.debug(f"[ROUTE_CLIENT] Forwarding media message")
                 result = await self.message_service.forward_message(
                     message=message,
@@ -198,14 +287,11 @@ class DialogueRouter:
                             operator_endpoint = DialogueEndpoint('group', dialogue_group_id, new_thread_id)
 
                             if message.text:
+                                # Re-use the same template and variables from above
                                 result = await self.message_service.send_template_to_endpoint(
                                     endpoint=operator_endpoint,
-                                    template_key='/support/operator_client_message',
-                                    variables={
-                                        'client_name': 'Client',
-                                        'message': message.text,
-                                        'dialogue_id': dialogue_id
-                                    }
+                                    template_key=template_key,
+                                    variables=variables
                                 )
                             else:
                                 result = await self.message_service.forward_message(
@@ -215,7 +301,8 @@ class DialogueRouter:
                                 )
 
                             success = result is not None
-                            logger.info(f"[ROUTE_CLIENT] Retry after thread recreation: {'success' if success else 'failed'}")
+                            logger.info(
+                                f"[ROUTE_CLIENT] Retry after thread recreation: {'success' if success else 'failed'}")
                             return success
                         else:
                             logger.error(f"[ROUTE_CLIENT] Failed to recreate thread for dialogue {dialogue_id}")
@@ -226,7 +313,8 @@ class DialogueRouter:
                         return False
 
             success = result is not None
-            logger.info(f"[ROUTE_CLIENT] Message routing {'successful' if success else 'failed'} for dialogue {dialogue_id}")
+            logger.info(
+                f"[ROUTE_CLIENT] Message routing {'successful' if success else 'failed'} for dialogue {dialogue_id}")
             return success
 
         except Exception as e:
@@ -255,7 +343,8 @@ class DialogueRouter:
 
             # Check if it's a command
             if message.text and message.text.startswith('&'):
-                logger.info(f"[ROUTE_OPERATOR] Detected command '{message.text.split()[0]}', delegating to command processor")
+                logger.info(
+                    f"[ROUTE_OPERATOR] Detected command '{message.text.split()[0]}', delegating to command processor")
                 # Delegate to command processor
                 return await self.command_processor.process_command(message, dialogue_id)
 
@@ -284,6 +373,32 @@ class DialogueRouter:
                     variables={'dialogue_id': dialogue_id}
                 )
                 return False
+
+            # NEW: Translate message if needed (for non-commands)
+            actual_message_text = message.text
+
+            if message.text:  # Only translate text messages
+                # Get languages
+                client_lang, operator_lang = await self._get_user_languages(
+                    dialogue_info.get('client_telegram_id'),
+                    message.from_user.id
+                )
+
+                # Process message with translation
+                translation_result = await self.ai_middleware.process_dialogue_message(
+                    text=message.text,
+                    source_lang=operator_lang,
+                    target_lang=client_lang,
+                    direction='operator_to_client',
+                    dialogue_id=dialogue_id
+                )
+
+                # Client sees ONLY translation (or original if same language)
+                if translation_result.get('display') == 'translation_only':
+                    actual_message_text = translation_result['translated']
+                    logger.info(f"[ROUTE_OPERATOR] Message translated from {operator_lang} to {client_lang}")
+                else:
+                    actual_message_text = translation_result.get('display', message.text)
 
             # Check client FSM state for consistency
             with get_db_session_ctx() as session:
@@ -328,12 +443,12 @@ class DialogueRouter:
                     template_key='/support/client_operator_message',
                     variables={
                         'operator_name': 'Support',
-                        'message': message.text,
+                        'message': actual_message_text,  # CHANGED: use translated text
                         'dialogue_id': dialogue_id
                     }
                 )
             else:
-                # Forward media directly
+                # Forward media directly (no translation for media)
                 logger.debug(f"[ROUTE_OPERATOR] Forwarding media message")
                 await self.message_service.forward_message(
                     message=message,

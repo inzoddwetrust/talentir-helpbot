@@ -4,6 +4,7 @@ Provides commands for administrators to manage operators and view statistics.
 """
 import logging
 import re
+import json
 from typing import Any, Callable, Awaitable
 from datetime import datetime, timedelta
 
@@ -241,6 +242,8 @@ async def handle_add_operator(message: Message, user, user_type, mainbot_user, s
                 template_key = "/admin/operator_already_exists"
             else:
                 existing_operator.isActive = True
+                if not existing_operator.languages and target_user.lang:
+                    existing_operator.languages = json.dumps([target_user.lang])
                 target_user.user_type = UserType.OPERATOR  # ТОЛЬКО оператор!
                 session.commit()
                 template_key = "/admin/operator_reactivated"
@@ -251,7 +254,8 @@ async def handle_add_operator(message: Message, user, user_type, mainbot_user, s
                 telegramID=telegram_id,
                 displayName=target_user.displayName,
                 isActive=True,
-                maxConcurrentTickets=5
+                maxConcurrentTickets=5,
+                languages=json.dumps([target_user.lang]) if target_user.lang else json.dumps(['en'])
             )
             session.add(new_operator)
             target_user.user_type = UserType.OPERATOR  # ТОЛЬКО оператор!

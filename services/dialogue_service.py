@@ -347,6 +347,23 @@ class DialogueService:
                 # Get client info
                 client_user = session.query(User).filter_by(userID=dialogue.userID).first()
 
+                # Get operator info - try dialogue first, then ticket
+                operator_telegram_id = None
+
+                # Method 1: Direct from dialogue
+                if dialogue.operatorID:
+                    operator = session.query(Operator).filter_by(operatorID=dialogue.operatorID).first()
+                    if operator:
+                        operator_telegram_id = operator.telegramID
+
+                # Method 2: From ticket if not in dialogue
+                elif dialogue.ticketID:
+                    ticket = session.query(Ticket).filter_by(ticketID=dialogue.ticketID).first()
+                    if ticket and ticket.assignedOperatorID:  # ИСПРАВЛЕНО: assignedOperatorID
+                        operator = session.query(Operator).filter_by(operatorID=ticket.assignedOperatorID).first()
+                        if operator:
+                            operator_telegram_id = operator.telegramID
+
                 # Parse context
                 context = {}
                 try:
@@ -362,6 +379,7 @@ class DialogueService:
                     'state': DialogueState.from_string(dialogue.state),
                     'status': dialogue.status,
                     'client_telegram_id': client_user.telegramID if client_user else None,
+                    'operator_telegram_id': operator_telegram_id,  # NEW FIELD
                     'group_id': dialogue.groupID,
                     'thread_id': dialogue.threadID,
                     'created_at': dialogue.createdAt,
@@ -370,7 +388,7 @@ class DialogueService:
                 }
 
         except Exception as e:
-            logger.error(f"Error getting dialogue info: {e}")
+            logger.error(f"Error getting dialogue info: {e}", exc_info=True)
             return None
 
     # === Private helper methods ===

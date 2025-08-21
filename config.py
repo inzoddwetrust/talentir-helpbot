@@ -67,6 +67,13 @@ class Config:
     ACTIVE_TICKETS = "active_tickets"
     GROUP_ID = "group_id"  # ID мультигруппы операторов
 
+    #Claude config
+    CLAUDE_API_KEY = 'CLAUDE_API_KEY'
+    CLAUDE_MODEL = 'CLAUDE_MODEL'
+    CLAUDE_MAX_TOKENS = 'CLAUDE_MAX_TOKENS'
+    CLAUDE_TIMEOUT = 'CLAUDE_TIMEOUT'
+    CLAUDE_RATE_LIMIT = 'CLAUDE_RATE_LIMIT'
+
     # Helpbot specific configuration
     TICKET_CATEGORIES = "ticket_categories"  # Available ticket categories
     AUTO_CLOSE_HOURS = "auto_close_hours"  # Hours before auto-closing inactive tickets
@@ -258,6 +265,11 @@ class Config:
             cls.DATABASE_URL: os.getenv("HELPBOT_DATABASE_URL"),
             cls.MAINBOT_DATABASE_URL: os.getenv("MAINBOT_DATABASE_URL"),
             cls.GROUP_ID: os.getenv("HELPBOT_GROUP_ID"),
+            cls.CLAUDE_API_KEY: os.getenv("CLAUDE_API_KEY"),
+            cls.CLAUDE_MODEL: os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022"),
+            cls.CLAUDE_MAX_TOKENS: os.getenv("CLAUDE_MAX_TOKENS", "1000"),
+            cls.CLAUDE_TIMEOUT: os.getenv("CLAUDE_TIMEOUT", "30"),
+            cls.CLAUDE_RATE_LIMIT: os.getenv("CLAUDE_RATE_LIMIT", "10"),
         }
 
         for key, value in env_vars.items():
