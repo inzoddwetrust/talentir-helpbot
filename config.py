@@ -73,6 +73,7 @@ class Config:
     CLAUDE_MAX_TOKENS = 'CLAUDE_MAX_TOKENS'
     CLAUDE_TIMEOUT = 'CLAUDE_TIMEOUT'
     CLAUDE_RATE_LIMIT = 'CLAUDE_RATE_LIMIT'
+    TRANSLATION_PROMPT = 'TRANSLATION_PROMPT'
 
     # Helpbot specific configuration
     TICKET_CATEGORIES = "ticket_categories"  # Available ticket categories

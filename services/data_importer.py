@@ -115,7 +115,8 @@ class ConfigImporter:
                             'OPERATOR_NOTIFICATION_DELAY',
                             'AUTO_ASSIGN_ENABLED',
                             'FEEDBACK_ENABLED',
-                            'FEEDBACK_DELAY_HOURS'
+                            'FEEDBACK_DELAY_HOURS',
+                            'TRANSLATION_PROMPT'
                     ):
                         config_key = getattr(Config, key.upper(), None)
                         if config_key:

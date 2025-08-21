@@ -69,31 +69,30 @@ class AIMiddleware:
         return self.claude_client  # И ЭТУ ТОЖЕ! ⬇️
 
     async def _translate(self, text: str, source_lang: str, target_lang: str) -> Optional[str]:
-        """
-        Core translation method using Claude API.
-
-        Args:
-            text: Text to translate
-            source_lang: Source language code (e.g., 'ru')
-            target_lang: Target language code (e.g., 'en')
-
-        Returns:
-            Optional[str]: Translated text or None if translation failed
-        """
         try:
             claude = await self._get_claude()
-
-            # Get full language names for better prompt
-            source_name = self.lang_names.get(source_lang, source_lang)
             target_name = self.lang_names.get(target_lang, target_lang)
+            prompt_template = Config.get(Config.TRANSLATION_PROMPT)
 
-            prompt = f"""Translate this customer support message from {source_name} to {target_name}.
-Keep the tone professional and friendly. Preserve any formatting, line breaks, and emoji.
-Only output the translation, nothing else.
+            if not prompt_template:
+                prompt_template = """You are a translation service. Your task is to ensure the message is in {target_name}.
 
-Message: {text}"""
+    Instructions:
+    1. If the message is already in {target_name}, output it unchanged
+    2. If the message is in any other language, translate it to {target_name}
+    3. Output ONLY the final text in {target_name}, no explanations
 
-            logger.debug(f"Translating from {source_lang} to {target_lang}: {text[:50]}...")
+    Message: {text}
+
+    Output in {target_name}:"""
+
+            # Форматируем промпт с переменными
+            prompt = prompt_template.format(
+                target_name=target_name,
+                text=text
+            )
+
+            logger.debug(f"Translating to {target_lang}: {text[:50]}...")
 
             response = await claude.messages.create(
                 model=Config.get(Config.CLAUDE_MODEL, "claude-3-5-sonnet-20241022"),

@@ -97,7 +97,7 @@ async def handle_upconfig(message: Message, user, user_type, mainbot_user, sessi
         # Only update helpbot-specific configs
         updated_keys = []
         for key, value in config_dict.items():
-            if key in ('GROUP_ID', 'TICKET_CATEGORIES', 'AUTO_CLOSE_HOURS', 'REMINDER_INTERVALS'):
+            if key in ('GROUP_ID', 'TICKET_CATEGORIES', 'AUTO_CLOSE_HOURS', 'REMINDER_INTERVALS', 'TRANSLATION_PROMPT'):
                 config_key = getattr(Config, key, None)
                 if config_key:
                     Config.set(config_key, value, source="sheets")
