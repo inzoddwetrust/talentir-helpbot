@@ -56,6 +56,7 @@ class Config:
     # Database configuration
     DATABASE_URL = "database_url"
     MAINBOT_DATABASE_URL = "mainbot_database_url"  # Read-only connection to mainbot
+    MAINBOT_URL = "mainbot_url"
 
     # System configuration
     SYSTEM_VERSION = "system_version"
@@ -265,6 +266,7 @@ class Config:
             ] if os.getenv("GOOGLE_CREDENTIALS_JSON") else None,
             cls.DATABASE_URL: os.getenv("HELPBOT_DATABASE_URL"),
             cls.MAINBOT_DATABASE_URL: os.getenv("MAINBOT_DATABASE_URL"),
+            cls.MAINBOT_URL: os.getenv("MAINBOT_URL"),
             cls.GROUP_ID: os.getenv("HELPBOT_GROUP_ID"),
             cls.CLAUDE_API_KEY: os.getenv("CLAUDE_API_KEY"),
             cls.CLAUDE_MODEL: os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022"),

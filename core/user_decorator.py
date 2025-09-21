@@ -9,11 +9,12 @@ Usage examples:
 """
 import logging
 import functools
-from typing import Callable, Any, Tuple, Optional
+from typing import Callable, Any, Union
 from aiogram import BaseMiddleware, Router
 from aiogram.types import Message, CallbackQuery, TelegramObject
+from sqlalchemy.orm import Session
 
-from core.db import get_helpbot_session, get_mainbot_session, DatabaseType
+from core.db import get_helpbot_session, get_mainbot_session
 from models.user import User, UserType
 from models.mainbot.user import User as MainbotUser
 from core.message_manager import MessageManager
@@ -86,85 +87,41 @@ class UserMiddleware(BaseMiddleware):
                 raise
 
 
-def get_or_create_user(update: Message | CallbackQuery, session) -> Tuple[
-    Optional[User], Optional[UserType], Optional[MainbotUser]]:
-    """
-    Get user object from database based on update.
-
-    First checks if user is a staff member (operator/admin) in helpbot DB.
-    Then checks if user exists in mainbot DB (client).
-
-    Args:
-        update: Message or CallbackQuery object
-        session: Helpbot database session
-
-    Returns:
-        Tuple of (helpbot_user, user_type, mainbot_user)
-        - helpbot_user: User object from helpbot DB
-        - user_type: UserType enum (CLIENT, OPERATOR, ADMIN)
-        - mainbot_user: User object from mainbot DB (None for staff)
-    """
+def get_or_create_user(update: Union[Message, CallbackQuery], session: Session):
     telegram_id = update.from_user.id
 
-    # Get admin IDs from config
-    admin_ids = Config.get(Config.ADMINS, [])
-    is_admin = telegram_id in admin_ids
-
-    # First check if user exists in helpbot
-    helpbot_user = session.query(User).filter_by(telegramID=telegram_id).first()
-
-    if helpbot_user:
-        # User exists - check if we need to update their type
-        if is_admin and helpbot_user.user_type != UserType.ADMIN:
-            logger.info(f"Updating user {telegram_id} to ADMIN based on Config.ADMINS")
-            helpbot_user.user_type = UserType.ADMIN
-            session.commit()
-
-        # If user is staff (admin or operator), return without checking mainbot
-        if helpbot_user.user_type in [UserType.OPERATOR, UserType.ADMIN]:
-            logger.info(f"Staff member {telegram_id} ({helpbot_user.user_type.value}) accessed bot")
-            return helpbot_user, helpbot_user.user_type, None
-
-    # Check if this is a /start command with payload
-    is_start_command = (
-            isinstance(update, Message) and
-            update.text and
-            update.text.startswith('/start')
-    )
-
-    # For non-staff, check mainbot database
+    # СНАЧАЛА проверяем mainbot - это обязательно для ВСЕХ
     mainbot_user = None
     with get_mainbot_session() as mainbot_session:
         mainbot_user = mainbot_session.query(MainbotUser).filter_by(telegramID=telegram_id).first()
 
-        if not mainbot_user and not is_admin:  # Admins don't need mainbot account
-            if is_start_command:
-                logger.warning(f"User {telegram_id} not found in mainbot, but used /start")
-            else:
-                logger.warning(f"User {telegram_id} not found in mainbot or helpbot")
-                return None, None, None
+    # НЕТ в mainbot = НЕТ доступа, точка!
+    if not mainbot_user:
+        logger.warning(f"REJECTED: User {telegram_id} not found in mainbot")
+        return None, None, None
 
-    # Create or update helpbot user record
+    # Теперь проверяем/создаем в helpbot
+    helpbot_user = session.query(User).filter_by(telegramID=telegram_id).first()
+
     if not helpbot_user:
-        # Determine user type based on admin list
-        user_type = UserType.ADMIN if is_admin else UserType.CLIENT
+        # Определяем тип на основе конфига админов
+        admin_ids = Config.get(Config.ADMINS, [])
+        user_type = UserType.ADMIN if telegram_id in admin_ids else UserType.CLIENT
 
+        # Создаем с данными из mainbot
         helpbot_user = User(
             telegramID=telegram_id,
-            user_type=user_type,  # Now correctly sets ADMIN if needed
-            lang=update.from_user.language_code or "en",
-            nickname=update.from_user.full_name or f"User {telegram_id}",
+            user_type=user_type,
+            lang=mainbot_user.lang,  # Всегда из mainbot!
+            mainbot_user_id=mainbot_user.userID,
+            nickname=mainbot_user.full_name,
+            firstname=mainbot_user.firstname,
+            lastname=mainbot_user.surname,
             status="active"
         )
         session.add(helpbot_user)
         session.commit()
-        logger.info(f"Created new user {telegram_id} with type {user_type.value}")
-    else:
-        # Update existing user if they should be admin
-        if is_admin and helpbot_user.user_type == UserType.CLIENT:
-            helpbot_user.user_type = UserType.ADMIN
-            session.commit()
-            logger.info(f"Updated user {telegram_id} from CLIENT to ADMIN")
+        logger.info(f"Created helpbot user {telegram_id} from mainbot user {mainbot_user.userID}")
 
     return helpbot_user, helpbot_user.user_type, mainbot_user
 

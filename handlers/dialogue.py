@@ -4,7 +4,7 @@ Dialogue handlers for helpbot - ticket creation and operator assignment.
 import logging
 import json
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
@@ -92,14 +92,11 @@ async def cmd_start(message: Message, user, mainbot_user, user_type, session, me
                     user.clear_fsm()
                     session.commit()
 
-                    # CRITICAL: Clean up any zombie handlers
                     if input_service:
                         logger.info(f"[CMD_START] Cleaning up stale handlers for user {user.telegramID}")
                         await input_service.cleanup_user_handlers(user.telegramID)
 
-                    # Continue with new ticket creation
-
-        # Additional check for active dialogues in DB (in case FSM is out of sync)
+        # Additional check for active dialogues in DB
         active_dialogue = session.query(Dialogue).filter_by(
             userID=user.userID,
             status='active'
@@ -119,7 +116,6 @@ async def cmd_start(message: Message, user, mainbot_user, user_type, session, me
                 }
                 user.set_fsm_state("has_ticket", fsm_context)
                 session.commit()
-                # Note: NOT cleaning handlers here because dialogue is active!
 
             await message_manager.send_template(
                 user=user,
@@ -144,10 +140,10 @@ async def cmd_start(message: Message, user, mainbot_user, user_type, session, me
             )
             return
 
-        # CRITICAL: Clean up any potential zombie handlers before creating new ticket
+        # Clean up any potential zombie handlers
         if input_service:
             logger.info(
-                f"[CMD_START] Preventive cleanup of handlers for user {user.telegramID} before creating new ticket")
+                f"[CMD_START] Preventive cleanup of handlers for user {user.telegramID} before ticket confirmation")
             await input_service.cleanup_user_handlers(user.telegramID)
 
         # Parse payload if exists
@@ -157,13 +153,60 @@ async def cmd_start(message: Message, user, mainbot_user, user_type, session, me
         if message.text and len(message.text.split()) > 1:
             payload = message.text.split(maxsplit=1)[1]
 
-            # Parse error code format: error_CODE123
             if payload.startswith("error_"):
                 error_code = payload
                 context = {"source": "deeplink", "timestamp": datetime.utcnow().isoformat()}
             else:
-                # Any other payload saved as context
                 context = {"payload": payload, "timestamp": datetime.utcnow().isoformat()}
+
+        # NEW: Save to FSM and show confirmation
+        fsm_context = {
+            "error_code": error_code,
+            "context": context,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        user.set_fsm_state("ticket_confirmation", fsm_context)
+        session.commit()
+
+        logger.info(f"User {user.telegramID} entered ticket confirmation state with error_code: {error_code}")
+
+        await message_manager.send_template(
+            user=user,
+            template_key="/support/welcome_confirmation",
+            update=message,
+            variables={
+                "user_name": user.displayName,
+                "error_code": error_code or "N/A"
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error in start command: {e}", exc_info=True)
+        await message_manager.send_template(
+            user=user,
+            template_key="/errors/general",
+            update=message,
+            variables={"error": str(e)}
+        )
+
+
+@dialogue_router.callback_query(F.data == "/ticket/confirm")
+@with_user()
+async def handle_ticket_confirm(callback: CallbackQuery, user, mainbot_user, user_type, session,
+                                message_manager: MessageManager):
+    """Handle ticket creation confirmation."""
+    try:
+        await callback.answer()
+
+        # Check FSM state
+        if user.get_fsm_state() != "ticket_confirmation":
+            await callback.answer("Сессия устарела. Используйте /start для начала.")
+            return
+
+        # Get saved context
+        fsm_context = user.get_fsm_context()
+        error_code = fsm_context.get("error_code")
+        context = fsm_context.get("context", {})
 
         # Create ticket
         ticket = Ticket(
@@ -180,13 +223,20 @@ async def cmd_start(message: Message, user, mainbot_user, user_type, session, me
         session.add(ticket)
         session.commit()
 
-        logger.info(f"Created ticket #{ticket.ticketID} for user {user.telegramID}")
+        # Clear FSM state (will be set again when dialogue is created)
+        user.clear_fsm()
+        session.commit()
+
+        logger.info(f"Created ticket #{ticket.ticketID} for user {user.telegramID} after confirmation")
+
+        # Edit original message to remove buttons
+        await callback.message.edit_reply_markup(reply_markup=None)
 
         # Send confirmation to user
         await message_manager.send_template(
             user=user,
             template_key="/support/ticket_created",
-            update=message,
+            update=callback.message,
             variables={
                 "ticket_id": ticket.ticketID,
                 "user_name": user.displayName,
@@ -198,13 +248,44 @@ async def cmd_start(message: Message, user, mainbot_user, user_type, session, me
         await notify_operators_about_ticket(ticket, user, session)
 
     except Exception as e:
-        logger.error(f"Error in start command: {e}", exc_info=True)
+        logger.error(f"Error in ticket confirmation: {e}", exc_info=True)
+        await callback.answer("Ошибка при создании тикета")
+
+
+@dialogue_router.callback_query(F.data == "/ticket/cancel")
+@with_user()
+async def handle_ticket_cancel(callback: CallbackQuery, user, mainbot_user, user_type, session,
+                               message_manager: MessageManager):
+    """Handle ticket creation cancellation."""
+    try:
+        await callback.answer()
+
+        # Clear FSM state
+        user.clear_fsm()
+        session.commit()
+
+        logger.info(f"User {user.telegramID} cancelled ticket creation")
+
+        # Edit original message to remove buttons
+        await callback.message.edit_reply_markup(reply_markup=None)
+
+        # Get mainbot URL from config
+        from config import Config
+        mainbot_url = Config.get(Config.MAINBOT_URL, "https://t.me/your_main_bot")
+
         await message_manager.send_template(
             user=user,
-            template_key="/errors/general",
-            update=message,
-            variables={"error": str(e)}
+            template_key="/support/cancelled_return",
+            update=callback.message,
+            variables={
+                "user_name": user.displayName,
+                "mainbot_url": mainbot_url.replace("https://", "")
+            }
         )
+
+    except Exception as e:
+        logger.error(f"Error in ticket cancellation: {e}", exc_info=True)
+        await callback.answer("Ошибка при отмене")
 
 
 async def notify_operators_about_ticket(ticket: Ticket, client_user: User, session):
