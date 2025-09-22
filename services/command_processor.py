@@ -254,7 +254,7 @@ class CommandProcessor:
 
     async def _handle_show_info(self, dialogue_id: str, dialogue_info: dict, args: str,
                                 operator_telegram_id: int, command_config) -> bool:
-        """Handle &info command - show user and ticket info."""
+        """Handle &info command - show CURRENT user and ticket information."""
         try:
             variables = {'ticket_id': dialogue_info['ticket_id']}
 
@@ -270,26 +270,29 @@ class CommandProcessor:
                         'created_at': ticket.createdAt.strftime('%Y-%m-%d %H:%M') if ticket.createdAt else 'Unknown'
                     })
 
-            # Get mainbot user info
+            # Get FRESH mainbot user info
             user_summary = await MainbotService.get_user_summary(dialogue_info['client_telegram_id'])
 
             if user_summary:
                 variables.update({
-                    'telegram_id': dialogue_info['client_telegram_id'],
-                    'full_name': user_summary.get('full_name', 'Unknown'),
+                    'ticket_id': dialogue_info['ticket_id'],
+                    'client_name': user_summary.get('full_name', 'Unknown'),
+                    'client_telegram_id': dialogue_info['client_telegram_id'],
                     'email': user_summary.get('email', 'N/A'),
-                    'phone': user_summary.get('phone', 'N/A'),
-                    'country': user_summary.get('country', 'N/A'),
-                    'balance_total': f"${user_summary.get('balance_total', 0):,.2f}",
-                    'kyc_status': user_summary.get('kyc_status', 'Unknown'),
-                    'days_since_registration': user_summary.get('days_since_registration', 'N/A')
+                    'user_balance': user_summary.get('balance_total', 0),
+                    'user_kyc': user_summary.get('kyc_status', 'Unknown'),
+                    'total_purchases': user_summary.get('total_purchases', 0),
+                    'total_payments': user_summary.get('total_payments', 0),
+                    'referral_count': user_summary.get('referral_count', 0),
+                    'upline_name': user_summary.get('upline_name', 'Unknown'),
+                    'legacy_status': user_summary.get('legacy_status', '❌ Not migrated')
                 })
 
-                # Use full info template
-                template_key = '/support/operator_user_info_full'
+                # Use same template as welcome message
+                template_key = '/support/operator_ticket_info'
             else:
                 variables['telegram_id'] = dialogue_info['client_telegram_id']
-                # Use basic info template
+                # Basic template if user not found
                 template_key = '/support/operator_user_info_basic'
 
             await self._send_to_operator(dialogue_id, template_key, variables)

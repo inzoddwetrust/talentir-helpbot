@@ -114,6 +114,23 @@ class MainbotService:
                         summary['upline_name'] = upline.full_name
                         summary['upline_user_id'] = upline.userID
 
+                # Check for legacy migration
+                from models.mainbot import ActiveBalance
+                legacy_migration = session.query(ActiveBalance).filter(
+                    ActiveBalance.userID == user.userID,
+                    ActiveBalance.reason.like('%legacy_migration%')
+                ).order_by(ActiveBalance.createdAt.desc()).first()
+
+                summary['legacy_migration'] = legacy_migration is not None
+                summary['legacy_migration_date'] = legacy_migration.createdAt.strftime(
+                    '%Y-%m-%d %H:%M') if legacy_migration else None
+
+                # Format legacy status for display
+                if legacy_migration:
+                    summary['legacy_status'] = f"✅ {summary['legacy_migration_date']}"
+                else:
+                    summary['legacy_status'] = "❌ Not migrated"
+
                 return summary
 
         except Exception as e:

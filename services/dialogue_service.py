@@ -604,7 +604,6 @@ class DialogueService:
             user_info = None
             if ticket.mainbot_user_id:
                 from services.mainbot_service import MainbotService
-                # ИСПОЛЬЗУЕМ ПЕРЕДАННЫЙ ПАРАМЕТР, А НЕ client_user!
                 user_info = await MainbotService.get_user_summary(client_telegram_id)
 
             await self.message_service.send_template_to_endpoint(
@@ -612,15 +611,21 @@ class DialogueService:
                 template_key='/support/operator_ticket_info',
                 variables={
                     'ticket_id': ticket.ticketID,
-                    # ИСПОЛЬЗУЕМ ПЕРЕДАННЫЕ ПАРАМЕТРЫ, А НЕ client_user!
                     'client_name': client_display_name,
                     'client_telegram_id': client_telegram_id,
                     'category': ticket.category or 'general',
                     'subject': ticket.subject or 'No subject',
                     'description': ticket.description or 'No description',
                     'error_code': ticket.error_code or 'None',
+                    # Extended user info
+                    'email': user_info.get('email', 'N/A') if user_info else 'N/A',
                     'user_balance': user_info.get('balance_total', 0) if user_info else 'N/A',
-                    'user_kyc': user_info.get('kyc_status', 'Unknown') if user_info else 'Unknown'
+                    'user_kyc': user_info.get('kyc_status', 'Unknown') if user_info else 'Unknown',
+                    'total_purchases': user_info.get('total_purchases', 0) if user_info else 0,
+                    'total_payments': user_info.get('total_payments', 0) if user_info else 0,
+                    'referral_count': user_info.get('referral_count', 0) if user_info else 0,
+                    'upline_name': user_info.get('upline_name', 'Unknown') if user_info else 'Unknown',
+                    'legacy_status': user_info.get('legacy_status', '❌ Not migrated') if user_info else '❌ Not migrated'
                 }
             )
 
@@ -634,11 +639,18 @@ class DialogueService:
             if not dialogue_info:
                 return
 
+            # Get mainbot URL from config
+            from config import Config
+            mainbot_url = Config.get(Config.MAINBOT_URL, "https://t.me/your_main_bot")
+            # Remove https:// prefix for |url| format
+            mainbot_url_clean = mainbot_url.replace("https://", "").replace("http://", "")
+
             variables = {
                 'dialogue_id': dialogue_id,
                 'ticket_id': dialogue_info['ticket_id'],
                 'closed_by': closed_by,
-                'reason': reason or 'No reason provided'
+                'reason': reason or 'No reason provided',
+                'mainbot_url': mainbot_url_clean  # Add mainbot URL for button
             }
 
             # Send to client
