@@ -422,20 +422,25 @@ async def handle_take_ticket(callback: CallbackQuery, user, user_type, mainbot_u
                 thread_id = dialogue_info['thread_id']
 
                 # Convert group ID for link format (remove -100 prefix)
-                chat_id_for_link = str(group_id).replace("-100", "") if str(group_id).startswith("-100") else str(
-                    group_id)
+                chat_id_for_link = str(group_id).replace("-100", "") if str(group_id).startswith("-100") else str(group_id)
 
-                # Create thread link
+                # Create thread link without https:// prefix
                 thread_link_for_template = f"t.me/c/{chat_id_for_link}/{thread_id}"
 
+                # Send link to operator's private chat
                 await message_manager.send_template(
                     user=user,
                     template_key="/support/operator_thread_link",
                     update=callback,
                     variables={
                         "ticket_id": ticket_id,
-                        "thread_link": thread_link_for_template,  # Без https://
-                        "client_name": ticket.user.displayName if ticket.user else "Unknown"
+                        "thread_link": thread_link_for_template,
+                        "client_name": ticket.user.displayName if ticket.user else "Unknown",
+                        "client_telegram_id": ticket.user.telegramID if ticket.user else "Unknown",
+                        "client_lang": ticket.user.lang if ticket.user else "en",
+                        "category": ticket.category or "general",
+                        "priority": ticket.priority.value if ticket.priority else "normal",
+                        "error_code": ticket.error_code if ticket.error_code else ""
                     }
                 )
 
