@@ -409,10 +409,36 @@ async def handle_take_ticket(callback: CallbackQuery, user, user_type, mainbot_u
 
         if dialogue_id:
             session.commit()
-            await callback.answer("✅ Ticket assigned! Dialogue created.")
+            await callback.answer("✅ Ticket assigned! Check your messages for the thread link.")
 
             # Delete notifications from all operators
             await delete_operator_notifications(ticket_id, callback.bot)
+
+            # Get dialogue info to get thread_id and group_id
+            dialogue_info = await dialogue_service.get_dialogue_info(dialogue_id)
+
+            if dialogue_info:
+                group_id = dialogue_info['group_id']
+                thread_id = dialogue_info['thread_id']
+
+                # Convert group ID for link format (remove -100 prefix)
+                chat_id_for_link = str(group_id).replace("-100", "") if str(group_id).startswith("-100") else str(
+                    group_id)
+
+                # Create thread link
+                thread_link = f"https://t.me/c/{chat_id_for_link}/{thread_id}"
+
+                # Send link to operator's private chat
+                await message_manager.send_template(
+                    user=user,
+                    template_key="/support/operator_thread_link",
+                    update=callback,
+                    variables={
+                        "ticket_id": ticket_id,
+                        "thread_link": thread_link,
+                        "client_name": ticket.user.displayName if ticket.user else "Unknown"
+                    }
+                )
 
             logger.info(f"Operator {user.telegramID} took ticket #{ticket_id}, dialogue {dialogue_id} created")
         else:
