@@ -426,16 +426,15 @@ async def handle_take_ticket(callback: CallbackQuery, user, user_type, mainbot_u
                     group_id)
 
                 # Create thread link
-                thread_link = f"https://t.me/c/{chat_id_for_link}/{thread_id}"
+                thread_link_for_template = f"t.me/c/{chat_id_for_link}/{thread_id}"
 
-                # Send link to operator's private chat
                 await message_manager.send_template(
                     user=user,
                     template_key="/support/operator_thread_link",
                     update=callback,
                     variables={
                         "ticket_id": ticket_id,
-                        "thread_link": thread_link,
+                        "thread_link": thread_link_for_template,  # Без https://
                         "client_name": ticket.user.displayName if ticket.user else "Unknown"
                     }
                 )
