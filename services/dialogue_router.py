@@ -175,31 +175,17 @@ class DialogueRouter:
             # Update dialogue activity
             await self._update_dialogue_activity(dialogue_id)
 
-            # NEW: Get languages and translate if needed
-            translation_result = {'display': message.text}  # Default - no translation
+            # Get languages for translation
+            dialogue_info = await self.dialogue_service.get_dialogue_info(dialogue_id)
+            client_lang = 'en'
+            operator_lang = 'en'
 
-            if message.text:  # Only translate text messages
-                dialogue_info = await self.dialogue_service.get_dialogue_info(dialogue_id)
-                logger.info(f"DEBUG dialogue_info: {dialogue_info}")
-                if dialogue_info and dialogue_info.get('operator_telegram_id'):
-                    operator_telegram_id = dialogue_info['operator_telegram_id']
-
-                    # Get languages
-                    client_lang, operator_lang = await self._get_user_languages(
-                        message.from_user.id,
-                        operator_telegram_id
-                    )
-
-                    # Process message with translation
-                    translation_result = await self.ai_middleware.process_dialogue_message(
-                        text=message.text,
-                        source_lang=client_lang,
-                        target_lang=operator_lang,
-                        direction='client_to_operator',
-                        dialogue_id=dialogue_id
-                    )
-                else:
-                    logger.warning(f"No operator info for dialogue {dialogue_id}, skipping translation")
+            if dialogue_info and dialogue_info.get('operator_telegram_id'):
+                operator_telegram_id = dialogue_info['operator_telegram_id']
+                client_lang, operator_lang = await self._get_user_languages(
+                    message.from_user.id,
+                    operator_telegram_id
+                )
 
             # Route to operator thread using saved data
             operator_endpoint = DialogueEndpoint('group', dialogue_group_id, dialogue_thread_id)
@@ -215,6 +201,19 @@ class DialogueRouter:
             variables = None  # Initialize for potential reuse
 
             if message.text:
+                # Translate text message if needed
+                translation_result = {'display': message.text}  # Default - no translation
+
+                if dialogue_info and dialogue_info.get('operator_telegram_id'):
+                    # Process message with translation
+                    translation_result = await self.ai_middleware.process_dialogue_message(
+                        text=message.text,
+                        source_lang=client_lang,
+                        target_lang=operator_lang,
+                        direction='client_to_operator',
+                        dialogue_id=dialogue_id
+                    )
+
                 # Send text with template
                 logger.debug(f"[ROUTE_CLIENT] Sending text message via template")
 
@@ -243,13 +242,78 @@ class DialogueRouter:
                     variables=variables
                 )
             else:
-                # Forward media directly (no translation for media)
-                logger.debug(f"[ROUTE_CLIENT] Forwarding media message")
-                result = await self.message_service.forward_message(
-                    message=message,
-                    to_endpoint=operator_endpoint,
-                    with_comment="📥 Client: "
-                )
+                # Handle media with potential caption translation
+                logger.debug(f"[ROUTE_CLIENT] Processing media message")
+
+                # Check if media has caption that needs translation
+                if message.caption:
+                    # Translate caption
+                    caption_translation = await self.ai_middleware.process_dialogue_message(
+                        text=message.caption,
+                        source_lang=client_lang,
+                        target_lang=operator_lang,
+                        direction='client_to_operator',
+                        dialogue_id=dialogue_id
+                    )
+
+                    # Format caption based on translation result
+                    if caption_translation.get('display') == 'both':
+                        # Show both original and translated
+                        caption_text = f"📥 Client:\n\n{caption_translation['original']}\n\n📝 Translation:\n{caption_translation['translated']}"
+                    else:
+                        # Just original caption
+                        caption_text = f"📥 Client: {message.caption}"
+
+                    # Send media with translated caption
+                    if message.photo:
+                        result = await self.message_service.bot.send_photo(
+                            **operator_endpoint.get_send_params(),
+                            photo=message.photo[-1].file_id,
+                            caption=caption_text,
+                            parse_mode='HTML'
+                        )
+                    elif message.video:
+                        result = await self.message_service.bot.send_video(
+                            **operator_endpoint.get_send_params(),
+                            video=message.video.file_id,
+                            caption=caption_text,
+                            parse_mode='HTML'
+                        )
+                    elif message.document:
+                        result = await self.message_service.bot.send_document(
+                            **operator_endpoint.get_send_params(),
+                            document=message.document.file_id,
+                            caption=caption_text,
+                            parse_mode='HTML'
+                        )
+                    elif message.voice:
+                        result = await self.message_service.bot.send_voice(
+                            **operator_endpoint.get_send_params(),
+                            voice=message.voice.file_id,
+                            caption=caption_text,
+                            parse_mode='HTML'
+                        )
+                    elif message.audio:
+                        result = await self.message_service.bot.send_audio(
+                            **operator_endpoint.get_send_params(),
+                            audio=message.audio.file_id,
+                            caption=caption_text,
+                            parse_mode='HTML'
+                        )
+                    else:
+                        # Other media types - just forward
+                        result = await self.message_service.forward_message(
+                            message=message,
+                            to_endpoint=operator_endpoint,
+                            with_comment="📥 Client: "
+                        )
+                else:
+                    # No caption - forward as before
+                    result = await self.message_service.forward_message(
+                        message=message,
+                        to_endpoint=operator_endpoint,
+                        with_comment="📥 Client: "
+                    )
 
             # If sending failed, check if we need to recreate thread
             if result is None:
@@ -374,31 +438,11 @@ class DialogueRouter:
                 )
                 return False
 
-            # NEW: Translate message if needed (for non-commands)
-            actual_message_text = message.text
-
-            if message.text:  # Only translate text messages
-                # Get languages
-                client_lang, operator_lang = await self._get_user_languages(
-                    dialogue_info.get('client_telegram_id'),
-                    message.from_user.id
-                )
-
-                # Process message with translation
-                translation_result = await self.ai_middleware.process_dialogue_message(
-                    text=message.text,
-                    source_lang=operator_lang,
-                    target_lang=client_lang,
-                    direction='operator_to_client',
-                    dialogue_id=dialogue_id
-                )
-
-                # Client sees ONLY translation (or original if same language)
-                if translation_result.get('display') == 'translation_only':
-                    actual_message_text = translation_result['translated']
-                    logger.info(f"[ROUTE_OPERATOR] Message translated from {operator_lang} to {client_lang}")
-                else:
-                    actual_message_text = translation_result.get('display', message.text)
+            # Get languages
+            client_lang, operator_lang = await self._get_user_languages(
+                dialogue_info.get('client_telegram_id'),
+                message.from_user.id
+            )
 
             # Check client FSM state for consistency
             with get_db_session_ctx() as session:
@@ -436,6 +480,25 @@ class DialogueRouter:
             logger.info(f"[ROUTE_OPERATOR] Routing message to client {dialogue_info['client_telegram_id']}")
 
             if message.text:
+                # Translate text message if needed
+                actual_message_text = message.text
+
+                # Process message with translation
+                translation_result = await self.ai_middleware.process_dialogue_message(
+                    text=message.text,
+                    source_lang=operator_lang,
+                    target_lang=client_lang,
+                    direction='operator_to_client',
+                    dialogue_id=dialogue_id
+                )
+
+                # Client sees ONLY translation (or original if same language)
+                if translation_result.get('display') == 'translation_only':
+                    actual_message_text = translation_result['translated']
+                    logger.info(f"[ROUTE_OPERATOR] Message translated from {operator_lang} to {client_lang}")
+                else:
+                    actual_message_text = translation_result.get('display', message.text)
+
                 # Send text with template
                 logger.debug(f"[ROUTE_OPERATOR] Sending text message via template")
                 await self.message_service.send_template_to_endpoint(
@@ -443,18 +506,81 @@ class DialogueRouter:
                     template_key='/support/client_operator_message',
                     variables={
                         'operator_name': 'Support',
-                        'message': actual_message_text,  # CHANGED: use translated text
+                        'message': actual_message_text,
                         'dialogue_id': dialogue_id
                     }
                 )
             else:
-                # Forward media directly (no translation for media)
-                logger.debug(f"[ROUTE_OPERATOR] Forwarding media message")
-                await self.message_service.forward_message(
-                    message=message,
-                    to_endpoint=client_endpoint,
-                    with_comment="💬 Support: "
-                )
+                # Handle media with potential caption translation
+                logger.debug(f"[ROUTE_OPERATOR] Processing media message")
+
+                # Check if media has caption that needs translation
+                if message.caption:
+                    # Translate caption
+                    caption_translation = await self.ai_middleware.process_dialogue_message(
+                        text=message.caption,
+                        source_lang=operator_lang,
+                        target_lang=client_lang,
+                        direction='operator_to_client',
+                        dialogue_id=dialogue_id
+                    )
+
+                    # Client sees only translated caption
+                    if caption_translation.get('display') == 'translation_only':
+                        caption_text = f"💬 Support: {caption_translation['translated']}"
+                    else:
+                        caption_text = f"💬 Support: {message.caption}"
+
+                    # Send media with translated caption
+                    if message.photo:
+                        await self.message_service.bot.send_photo(
+                            **client_endpoint.get_send_params(),
+                            photo=message.photo[-1].file_id,
+                            caption=caption_text,
+                            parse_mode='HTML'
+                        )
+                    elif message.video:
+                        await self.message_service.bot.send_video(
+                            **client_endpoint.get_send_params(),
+                            video=message.video.file_id,
+                            caption=caption_text,
+                            parse_mode='HTML'
+                        )
+                    elif message.document:
+                        await self.message_service.bot.send_document(
+                            **client_endpoint.get_send_params(),
+                            document=message.document.file_id,
+                            caption=caption_text,
+                            parse_mode='HTML'
+                        )
+                    elif message.voice:
+                        await self.message_service.bot.send_voice(
+                            **client_endpoint.get_send_params(),
+                            voice=message.voice.file_id,
+                            caption=caption_text,
+                            parse_mode='HTML'
+                        )
+                    elif message.audio:
+                        await self.message_service.bot.send_audio(
+                            **client_endpoint.get_send_params(),
+                            audio=message.audio.file_id,
+                            caption=caption_text,
+                            parse_mode='HTML'
+                        )
+                    else:
+                        # Other media types - just forward
+                        await self.message_service.forward_message(
+                            message=message,
+                            to_endpoint=client_endpoint,
+                            with_comment="💬 Support: "
+                        )
+                else:
+                    # No caption - forward as before
+                    await self.message_service.forward_message(
+                        message=message,
+                        to_endpoint=client_endpoint,
+                        with_comment="💬 Support: "
+                    )
 
             logger.info(f"[ROUTE_OPERATOR] Message routing successful for dialogue {dialogue_id}")
             return True
